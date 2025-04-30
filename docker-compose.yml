@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  # MongoDB service
+  mongodb:
+    image: mongo:6.0
+    container_name: shopify-processor-mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=shopify-processor
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - shopify-processor-network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    
+  # MongoDB Express (Web-based MongoDB admin interface)
+  mongo-express:
+    image: mongo-express:latest
+    container_name: shopify-processor-mongo-express
+    platform: linux/amd64  # Specified platform
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+    networks:
+      - shopify-processor-network
+    depends_on:
+      - mongodb
+    restart: unless-stopped
+    
+  # Redis service
+  redis:
+    image: redis:7.0-alpine
+    container_name: shopify-processor-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - shopify-processor-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    
+  # Alternative to Redis Commander that works better on ARM64
+  redis-insight:
+    image: redislabs/redisinsight:latest
+    container_name: shopify-processor-redis-insight
+    ports:
+      - "8082:8001"
+    networks:
+      - shopify-processor-network
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+networks:
+  shopify-processor-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
+  redis_data:
