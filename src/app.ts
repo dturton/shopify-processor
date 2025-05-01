@@ -6,12 +6,18 @@ import mongoose from "mongoose";
 import apiRoutes from "./routes/api";
 import { QueueService } from "./services/queue";
 import { WorkerService } from "./workers/product-worker";
+import { initSyncWorkers, shutdownSyncWorkers } from "./services/sync-queue";
 import { initializeDatabase } from "./db/init-mongodb";
 import config from "./config";
 import logger from "./utils/logger";
 
 // Initialize Express app
 const app = express();
+
+// Initialize workers
+const workers = initSyncWorkers();
+
+console.log("Sync workers initialized:", workers);
 
 // Apply middleware
 app.use(helmet());
@@ -107,6 +113,9 @@ process.on("SIGTERM", async () => {
   await QueueService.closeQueue();
   await mongoose.connection.close();
   logger.info("Server shutdown complete");
+  await shutdownSyncWorkers();
+  logger.info("Sync workers shutdown complete");
+
   process.exit(0);
 });
 

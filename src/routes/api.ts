@@ -3,10 +3,10 @@ import express, { Request, Response, NextFunction } from "express";
 import { ShopifyAPI } from "../services/shopify-api";
 import { QueueService } from "../services/queue";
 import { JobTracker } from "../services/job-tracker";
-import { ShopifyCredentials, ProductFilters } from "../types";
+import { ProductFilters } from "../types";
 import logger from "../utils/logger";
-import { ProductModel } from "../models/product";
 import { SyncStateModel } from "../models/sync-state";
+import { getSyncQueueStats, queueProductSync } from "../services/sync-queue";
 
 const router = express.Router();
 
@@ -73,7 +73,7 @@ const validateJobId = async (
   }
 };
 
-// API endpoint to sync products with MongoDB
+// API endpoint to sync products with MongoDB using BullMQ
 router.post(
   "/sync-products",
   validateShopifyCredentials,
@@ -82,98 +82,66 @@ router.post(
       // Get parameters from request
       const {
         filters = {},
-        limit = "all",
+        limit = req.body.limit || 50,
         batchSize = 100,
-        forceFullSync = false, // If true, ignore lastSyncedAt and do a full sync
+        forceFullSync = false,
       } = req.body;
 
       // Get store identifier from shop credentials
       const storeId = req.shopifyCredentials.shopName;
 
-      // Check if a sync is already in progress
-      const existingSyncState = await SyncStateModel.findOne({
-        storeId,
-        syncType: "products",
-        isInProgress: true,
-      });
-
-      if (existingSyncState) {
-        res.status(409).json({
-          success: false,
-          error: "A product sync is already in progress for this store",
-          syncState: existingSyncState,
-        });
-        return;
-      }
-
-      // Initialize Shopify API
-      const shopify = new ShopifyAPI(req.shopifyCredentials);
-
-      // Get or create sync state
-      let syncState = await SyncStateModel.findOne({
-        storeId,
-        syncType: "products",
-      });
-
-      if (!syncState) {
-        syncState = new SyncStateModel({
+      try {
+        // Queue the sync job
+        const { jobId, syncStateId } = await queueProductSync(
           storeId,
-          syncType: "products",
-          totalSyncs: 0,
-          lastSyncStats: {
-            errors: [],
-          },
-        });
-      }
-
-      // Prepare for new sync
-      syncState.isInProgress = true;
-      syncState.lastSyncStats = {
-        startedAt: new Date(),
-        completedAt: new Date(), // Will be updated later
-        productsProcessed: 0,
-        productsCreated: 0,
-        productsUpdated: 0,
-        productsDeleted: 0,
-        errors: [],
-      };
-      await syncState.save();
-
-      // Add filters for incremental sync if not doing a force full sync
-      let incrementalFilters = { ...filters };
-      if (!forceFullSync && syncState.lastSyncedAt) {
-        // Filter products updated since last sync
-        incrementalFilters.updatedAtMin = syncState.lastSyncedAt.toISOString();
-        logger.info(
-          `Performing incremental sync since ${syncState.lastSyncedAt.toISOString()}`
+          req.shopifyCredentials,
+          {
+            filters,
+            limit,
+            batchSize,
+            forceFullSync,
+          }
         );
-      } else {
-        logger.info("Performing full sync");
+
+        // Get the sync state
+        const syncState = await SyncStateModel.findById(syncStateId);
+
+        // Send response
+        res.json({
+          success: true,
+          message: "Product sync queued",
+          jobId,
+          syncStateId,
+          syncState,
+          incremental: !forceFullSync && !!syncState?.lastSyncedAt,
+        });
+      } catch (queueError) {
+        const error = queueError as Error;
+        // If there's already a sync in progress, return 409 Conflict
+        if (error.message.includes("already in progress")) {
+          const syncState = await SyncStateModel.findOne({
+            storeId,
+            syncType: "products",
+            isInProgress: true,
+          });
+
+          res.status(409).json({
+            success: false,
+            error: error.message,
+            syncState,
+          });
+          return;
+        }
+
+        // Otherwise rethrow the error
+        throw queueError;
       }
-
-      // Send initial response
-      res.json({
-        success: true,
-        message: "Product sync started",
-        syncState,
-        incremental: !forceFullSync && !!syncState.lastSyncedAt,
-      });
-
-      // Continue processing in the background
-      processSyncInBackground(
-        shopify,
-        incrementalFilters,
-        limit,
-        batchSize,
-        syncState,
-        forceFullSync
-      );
     } catch (error) {
-      logger.error("Failed to start product sync:", error);
+      logger.error("Failed to queue product sync:", error);
       res.status(500).json({
         success: false,
         error:
-          error.message || "An error occurred while starting the product sync",
+          error.message || "An error occurred while queuing the product sync",
       });
     }
   }
@@ -201,9 +169,16 @@ router.get(
         return;
       }
 
+      // Get queue stats if the sync is in progress
+      let queueStats;
+      if (syncState.isInProgress) {
+        queueStats = await getSyncQueueStats();
+      }
+
       res.json({
         success: true,
         syncState,
+        queueStats,
       });
     } catch (error) {
       logger.error("Error fetching sync status:", error);
@@ -215,177 +190,27 @@ router.get(
   }
 );
 
-// Background processing function with state tracking
-async function processSyncInBackground(
-  shopify: ShopifyAPI,
-  filters: ProductFilters,
-  limit: number | "all",
-  batchSize: number,
-  syncState: ISyncState,
-  forceFullSync: boolean
-) {
-  try {
-    const startTime = Date.now();
+// API endpoint to get queue stats
+router.get(
+  "/sync-queue-stats",
+  validateShopifyCredentials,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const stats = await getSyncQueueStats();
 
-    // Get product IDs (either all or a limited number)
-    const productIds = await shopify.getProductIds(filters, {
-      limit,
-      batchSize,
-    });
-
-    logger.info(
-      `Retrieved ${productIds.length} product IDs, beginning detailed sync`
-    );
-
-    // If doing a full sync and there are deleted products, we need to track that
-    let existingProductIds: string[] = [];
-    if (forceFullSync) {
-      // Get all product IDs from our database for this store
-      existingProductIds = await ProductModel.distinct("productId");
+      res.json({
+        success: true,
+        stats,
+      });
+    } catch (error) {
+      logger.error("Error fetching queue stats:", error);
+      res.status(500).json({
+        success: false,
+        error: error.message || "An error occurred while fetching queue stats",
+      });
     }
-
-    // Process products in batches
-    for (let i = 0; i < productIds.length; i += batchSize) {
-      const batchIds = productIds.slice(i, i + batchSize);
-
-      // Fetch detailed product information for each batch
-      const productPromises = batchIds.map((id) => shopify.getProduct(id));
-      const products = await Promise.all(productPromises);
-
-      // Process each product
-      for (const shopifyProduct of products) {
-        try {
-          // Convert Shopify product to our model format
-          const productData = {
-            productId: shopifyProduct.id,
-            title: shopifyProduct.title,
-            description: shopifyProduct.description,
-            handle: shopifyProduct.handle,
-            productType: shopifyProduct.product_type,
-            vendor: shopifyProduct.vendor,
-            tags: shopifyProduct.tags,
-            variants: shopifyProduct.variants.map((v: any) => ({
-              variantId: v.id,
-              price: v.price,
-              sku: v.sku,
-              compareAtPrice: v.compare_at_price,
-              inventoryQuantity: v.inventory_quantity,
-              inventoryItemId: v.inventory_item_id,
-            })),
-            shopifyCreatedAt: new Date(shopifyProduct.created_at),
-            shopifyUpdatedAt: new Date(shopifyProduct.updated_at),
-          };
-
-          // Try to find an existing product or create a new one
-          const existingProduct = await ProductModel.findOne({
-            productId: shopifyProduct.id,
-          });
-
-          if (existingProduct) {
-            // Update existing product
-            await ProductModel.updateOne(
-              { productId: shopifyProduct.id },
-              productData
-            );
-            syncState.lastSyncStats.productsUpdated++;
-          } else {
-            // Create new product
-            await ProductModel.create(productData);
-            syncState.lastSyncStats.productsCreated++;
-          }
-
-          syncState.lastSyncStats.productsProcessed++;
-
-          // Remove from existingProductIds since we've processed it
-          if (forceFullSync) {
-            const index = existingProductIds.indexOf(shopifyProduct.id);
-            if (index >= 0) {
-              existingProductIds.splice(index, 1);
-            }
-          }
-
-          // Log progress occasionally
-          if (syncState.lastSyncStats.productsProcessed % 100 === 0) {
-            logger.info(
-              `Sync progress: ${syncState.lastSyncStats.productsProcessed}/${productIds.length} products processed`
-            );
-
-            // Update sync state to show progress
-            syncState.lastSyncStats.completedAt = new Date();
-            await syncState.save();
-          }
-        } catch (productError) {
-          logger.error(
-            `Error processing product ${shopifyProduct.id}:`,
-            productError
-          );
-          syncState.lastSyncStats.errors.push({
-            productId: shopifyProduct.id,
-            error: productError.message,
-          });
-          await syncState.save();
-        }
-      }
-
-      // Add a small delay between batches to avoid overwhelming the API
-      if (i + batchSize < productIds.length) {
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-    }
-
-    // Handle deleted products if doing a full sync
-    if (forceFullSync && existingProductIds.length > 0) {
-      logger.info(
-        `Removing ${existingProductIds.length} products that no longer exist in Shopify`
-      );
-
-      // Delete in batches
-      for (let i = 0; i < existingProductIds.length; i += batchSize) {
-        const deleteBatch = existingProductIds.slice(i, i + batchSize);
-        await ProductModel.deleteMany({ productId: { $in: deleteBatch } });
-      }
-
-      syncState.lastSyncStats.productsDeleted = existingProductIds.length;
-    }
-
-    // Calculate duration
-    const endTime = Date.now();
-    const duration = endTime - startTime;
-
-    // Update sync state with final stats
-    syncState.isInProgress = false;
-    syncState.lastSyncedAt = new Date();
-    syncState.lastSyncDuration = duration;
-    syncState.totalSyncs += 1;
-    syncState.totalProductsProcessed +=
-      syncState.lastSyncStats.productsProcessed;
-    syncState.totalProductsCreated += syncState.lastSyncStats.productsCreated;
-    syncState.totalProductsUpdated += syncState.lastSyncStats.productsUpdated;
-    syncState.totalProductsDeleted += syncState.lastSyncStats.productsDeleted;
-    syncState.lastSyncStats.completedAt = new Date();
-    await syncState.save();
-
-    logger.info("Product sync completed", {
-      productsProcessed: syncState.lastSyncStats.productsProcessed,
-      productsUpdated: syncState.lastSyncStats.productsUpdated,
-      productsCreated: syncState.lastSyncStats.productsCreated,
-      productsDeleted: syncState.lastSyncStats.productsDeleted,
-      errors: syncState.lastSyncStats.errors.length,
-      durationMs: duration,
-      durationFormatted: `${Math.floor(duration / 60000)}m ${Math.floor(
-        (duration % 60000) / 1000
-      )}s`,
-    });
-  } catch (error) {
-    logger.error("Product sync failed:", error);
-
-    // Update sync state with error
-    syncState.isInProgress = false;
-    syncState.lastSyncError = error.message;
-    syncState.lastSyncStats.completedAt = new Date();
-    await syncState.save();
   }
-}
+);
 
 // API endpoint to get product IDs
 router.get(
@@ -781,6 +606,94 @@ router.post(
       res.status(500).json({
         success: false,
         error: error.message || "An error occurred while clearing the queue",
+      });
+    }
+  }
+);
+
+// API endpoint to manually check and fix stuck syncs
+router.post(
+  "/fix-stuck-syncs",
+  validateShopifyCredentials,
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      // Find syncs that are in progress
+      const stuckSyncs = await SyncStateModel.find({
+        isInProgress: true,
+      });
+
+      const results = [];
+
+      // For each stuck sync, check if all batch jobs are completed
+      for (const syncState of stuckSyncs) {
+        // Check when this sync was started
+        const startTime = syncState.lastSyncStats.startedAt?.getTime() || 0;
+        const duration = Date.now() - startTime;
+        const durationMinutes = Math.floor(duration / 60000);
+
+        // Check batch job status
+        const batchJobsTotal = syncState.lastSyncStats.batchJobs?.total || 0;
+        const batchJobsCompleted =
+          syncState.lastSyncStats.batchJobs?.completed || 0;
+        const batchJobsFailed = syncState.lastSyncStats.batchJobs?.failed || 0;
+
+        const allBatchesComplete =
+          batchJobsTotal > 0 &&
+          batchJobsCompleted + batchJobsFailed >= batchJobsTotal;
+
+        // If all batches are complete or it's been stuck for over 30 minutes
+        if (allBatchesComplete || durationMinutes > 30) {
+          // Mark as complete
+          syncState.isInProgress = false;
+          syncState.lastSyncedAt = new Date();
+          syncState.lastSyncDuration = duration;
+          syncState.totalSyncs += 1;
+          syncState.totalProductsProcessed +=
+            syncState.lastSyncStats.productsProcessed;
+          syncState.totalProductsCreated +=
+            syncState.lastSyncStats.productsCreated;
+          syncState.totalProductsUpdated +=
+            syncState.lastSyncStats.productsUpdated;
+          syncState.lastSyncStats.completedAt = new Date();
+
+          if (!allBatchesComplete) {
+            syncState.lastSyncError = `Sync automatically marked as complete after ${durationMinutes} minutes`;
+          }
+
+          await syncState.save();
+          logger.info(
+            `Sync ${syncState._id} marked as complete after ${durationMinutes} minutes`
+          );
+
+          results.push({
+            id: syncState._id,
+            storeId: syncState.storeId,
+            fixed: true,
+            reason: allBatchesComplete ? "All batches complete" : "Timeout",
+            duration: `${durationMinutes} minutes`,
+          });
+        } else {
+          results.push({
+            id: syncState._id,
+            storeId: syncState.storeId,
+            fixed: false,
+            status: {
+              duration: `${durationMinutes} minutes`,
+              batches: `${batchJobsCompleted}/${batchJobsTotal} completed, ${batchJobsFailed} failed`,
+            },
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        syncsChecked: stuckSyncs.length,
+        results,
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        error: error.message,
       });
     }
   }
