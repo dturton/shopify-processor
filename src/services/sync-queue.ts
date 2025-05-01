@@ -39,6 +39,55 @@ interface ProcessProductBatchJob {
   forceFullSync: boolean;
 }
 
+async function resetIncompleteJobs() {
+  try {
+    // Find all sync states that are stuck in progress
+    const stuckSyncs = await SyncStateModel.find({
+      isInProgress: true,
+      "lastSyncStats.startedAt": { $exists: true },
+    });
+
+    logger.info(
+      `Found ${stuckSyncs.length} sync jobs stuck in 'in progress' state`
+    );
+
+    // Reset each one
+    for (const sync of stuckSyncs) {
+      // If startedAt and completedAt are the same, this is likely a stuck job
+      if (
+        sync.lastSyncStats.startedAt &&
+        sync.lastSyncStats.completedAt &&
+        sync.lastSyncStats.startedAt.getTime() ===
+          sync.lastSyncStats.completedAt.getTime()
+      ) {
+        logger.warn(
+          `Resetting stuck sync job ${sync._id} for store ${sync.storeId}`
+        );
+
+        // Mark any non-completed batch jobs as failed
+        if (Array.isArray(sync.lastSyncStats.batchJobs)) {
+          for (const job of sync.lastSyncStats.batchJobs) {
+            if (job.status !== "completed" && job.status !== "failed") {
+              job.status = "failed";
+              job.error = "Reset due to stuck sync state";
+            }
+          }
+        }
+
+        // Reset the job state
+        sync.isInProgress = false;
+        sync.lastSyncError =
+          "Sync was reset due to being stuck in progress state";
+
+        // Save the updated state
+        await sync.save();
+      }
+    }
+  } catch (error) {
+    logger.error("Error resetting incomplete jobs:", error);
+  }
+}
+
 // Create queues
 const syncQueue = new Queue<ProductSyncJob>("product-sync", {
   connection: redisOptions,
@@ -187,7 +236,7 @@ export function initSyncWorkers() {
           batchJobs.push(batchJob.id);
         }
 
-        // Update sync state with batch jobs
+        // Update sync state with batch jobs - using object format
         syncState.lastSyncStats.batchJobs = {
           total: batchJobs.length,
           completed: 0,
@@ -260,8 +309,12 @@ export function initSyncWorkers() {
         // Initialize Shopify API
         const shopify = new ShopifyAPI(shopCredentials);
 
-        // Update batch job status
-        if (!syncState.lastSyncStats.batchJobs) {
+        // Ensure batchJobs exists and has the right structure
+        if (
+          !syncState.lastSyncStats.batchJobs ||
+          typeof syncState.lastSyncStats.batchJobs !== "object" ||
+          Array.isArray(syncState.lastSyncStats.batchJobs)
+        ) {
           syncState.lastSyncStats.batchJobs = {
             total: 0,
             completed: 0,
@@ -270,6 +323,9 @@ export function initSyncWorkers() {
             ids: [],
           };
         }
+
+        // Test field
+        syncState.testMessage = "test";
 
         // Fetch product details
         const batchErrors = [];
@@ -369,9 +425,17 @@ export function initSyncWorkers() {
         syncState.lastSyncStats.productsUpdated += updatedCount;
         syncState.lastSyncStats.errors.push(...batchErrors);
 
-        // Update batch job status
-        syncState.lastSyncStats.batchJobs.completed += 1;
-        syncState.lastSyncStats.batchJobs.pending -= 1;
+        // Update batch job status - using object format
+        if (
+          typeof syncState.lastSyncStats.batchJobs === "object" &&
+          !Array.isArray(syncState.lastSyncStats.batchJobs)
+        ) {
+          syncState.lastSyncStats.batchJobs.completed += 1;
+          syncState.lastSyncStats.batchJobs.pending = Math.max(
+            0,
+            syncState.lastSyncStats.batchJobs.pending - 1
+          );
+        }
 
         await syncState.save();
 
@@ -391,7 +455,12 @@ export function initSyncWorkers() {
 
         // Update sync state with batch error
         const syncState = await SyncStateModel.findById(syncStateId);
-        if (syncState && syncState.lastSyncStats.batchJobs) {
+        if (
+          syncState &&
+          syncState.lastSyncStats.batchJobs &&
+          typeof syncState.lastSyncStats.batchJobs === "object" &&
+          !Array.isArray(syncState.lastSyncStats.batchJobs)
+        ) {
           syncState.lastSyncStats.batchJobs.failed += 1;
           syncState.lastSyncStats.batchJobs.pending -= 1;
           syncState.lastSyncStats.errors.push({
@@ -407,7 +476,7 @@ export function initSyncWorkers() {
     },
     {
       connection: redisOptions,
-      concurrency: 5, // Process multiple batches concurrently, adjust based on your needs
+      concurrency: 5, // Process multiple batches concurrently
     }
   );
 
@@ -416,7 +485,7 @@ export function initSyncWorkers() {
     logger.info(`Sync job ${jobId} completed`);
   });
 
-  // Handle all batch jobs completed event
+  // Batch completed event handler
   batchQueueEvents.on("completed", async ({ jobId }) => {
     // Find the job to get the syncStateId
     const job = await productBatchQueue.getJob(jobId);
@@ -437,143 +506,206 @@ export function initSyncWorkers() {
       return;
     }
 
-    // Update batch job status if not already done
-    if (!syncState.lastSyncStats.batchJobs) {
-      syncState.lastSyncStats.batchJobs = {
-        total: 0,
-        completed: 0,
-        failed: 0,
-        pending: 0,
-        ids: [],
-      };
-    }
-
-    // Increment completed count and decrement pending count
-    syncState.lastSyncStats.batchJobs.completed += 1;
-    syncState.lastSyncStats.batchJobs.pending = Math.max(
-      0,
-      syncState.lastSyncStats.batchJobs.pending - 1
-    );
-
-    // Make sure to save this update
     try {
+      // Ensure batchJobs has the right structure
+      if (
+        !syncState.lastSyncStats.batchJobs ||
+        typeof syncState.lastSyncStats.batchJobs !== "object" ||
+        Array.isArray(syncState.lastSyncStats.batchJobs)
+      ) {
+        syncState.lastSyncStats.batchJobs = {
+          total: 0,
+          completed: 0,
+          failed: 0,
+          pending: 0,
+          ids: [],
+        };
+      }
+
+      // Increment completed count and decrement pending count
+      const batchJobs = syncState.lastSyncStats.batchJobs as any;
+      batchJobs.completed += 1;
+      batchJobs.pending = Math.max(0, batchJobs.pending - 1);
+
+      // Save this update
       await syncState.save();
       logger.debug(
-        `Updated batch job status for sync ${syncStateId}: ${syncState.lastSyncStats.batchJobs.completed}/${syncState.lastSyncStats.batchJobs.total} completed`
+        `Updated batch job status for sync ${syncStateId}: ${batchJobs.completed}/${batchJobs.total} completed`
       );
-    } catch (saveError) {
-      logger.error(
-        `Error saving sync state after batch completion: ${saveError.message}`,
-        saveError
-      );
-    }
 
-    // Check if all batch jobs are completed
-    const allCompleted =
-      syncState.lastSyncStats.batchJobs &&
-      syncState.lastSyncStats.batchJobs.completed +
-        syncState.lastSyncStats.batchJobs.failed ===
-        syncState.lastSyncStats.batchJobs.total;
+      // Check if all batch jobs are completed
+      let allCompleted = false;
 
-    if (allCompleted) {
-      logger.info(`All batch jobs completed for sync ${syncStateId}`);
+      if (batchJobs.ids && batchJobs.ids.length > 0) {
+        const totalExpectedJobs = batchJobs.ids.length;
+        const completedJobs = batchJobs.completed;
+        const failedJobs = batchJobs.failed;
 
-      try {
-        // Handle deleted products if doing a full sync
-        if (
-          forceFullSync &&
-          syncState.lastSyncStats.existingProductIds &&
-          syncState.lastSyncStats.existingProductIds.length > 0
-        ) {
-          const productsToDelete = syncState.lastSyncStats.existingProductIds;
-          logger.info(
-            `Removing ${productsToDelete.length} products that no longer exist in Shopify`
-          );
+        allCompleted = completedJobs + failedJobs >= totalExpectedJobs;
 
-          try {
-            // Delete the products
-            const result = await ProductModel.deleteMany({
-              storeId: syncState.storeId,
-              productId: { $in: productsToDelete },
-            });
+        logger.debug(
+          `Job completion check: ${completedJobs} completed + ${failedJobs} failed = ${
+            completedJobs + failedJobs
+          } of ${totalExpectedJobs} total`
+        );
+      } else {
+        // Fallback to comparing counters if we don't have job IDs
+        allCompleted =
+          batchJobs.total > 0 &&
+          batchJobs.completed + batchJobs.failed >= batchJobs.total;
+      }
 
-            syncState.lastSyncStats.productsDeleted = result.deletedCount || 0;
-          } catch (error) {
-            logger.error(`Error deleting products:`, error);
-            syncState.lastSyncStats.errors.push({
-              productId: "deletion",
-              error: error.message,
-            });
-          }
-        }
+      if (allCompleted) {
+        logger.info(`All batch jobs completed for sync ${syncStateId}`);
 
-        // Calculate duration
-        const startTime = syncState.lastSyncStats.startedAt.getTime();
-        const endTime = Date.now();
-        const duration = endTime - startTime;
-
-        // Update sync state with final stats
-        syncState.isInProgress = false;
-        syncState.lastSyncedAt = new Date();
-        syncState.lastSyncDuration = duration;
-        syncState.totalSyncs += 1;
-        syncState.totalProductsProcessed +=
-          syncState.lastSyncStats.productsProcessed;
-        syncState.totalProductsCreated +=
-          syncState.lastSyncStats.productsCreated;
-        syncState.totalProductsUpdated +=
-          syncState.lastSyncStats.productsUpdated;
-        syncState.totalProductsDeleted +=
-          syncState.lastSyncStats.productsDeleted;
-        syncState.lastSyncStats.completedAt = new Date();
-
-        // Save the final state with extra logging and error handling
         try {
-          await syncState.save();
-          logger.info("Successfully saved final sync state", { syncStateId });
-        } catch (finalSaveError) {
+          // Handle deleted products if doing a full sync
+          if (
+            forceFullSync &&
+            syncState.lastSyncStats.existingProductIds &&
+            syncState.lastSyncStats.existingProductIds.length > 0
+          ) {
+            const productsToDelete = syncState.lastSyncStats.existingProductIds;
+            logger.info(
+              `Removing ${productsToDelete.length} products that no longer exist in Shopify`
+            );
+
+            try {
+              // Delete the products
+              const result = await ProductModel.deleteMany({
+                storeId: syncState.storeId,
+                productId: { $in: productsToDelete },
+              });
+
+              syncState.lastSyncStats.productsDeleted =
+                result.deletedCount || 0;
+            } catch (error) {
+              logger.error(`Error deleting products:`, error);
+              syncState.lastSyncStats.errors.push({
+                productId: "deletion",
+                error: error.message,
+              });
+            }
+          }
+
+          // Calculate duration
+          const startTime = syncState.lastSyncStats.startedAt.getTime();
+          const endTime = Date.now();
+          const duration = endTime - startTime;
+
+          // Update sync state with final stats
+          syncState.isInProgress = false; // Ensure this is set to false
+          syncState.lastSyncedAt = new Date();
+          syncState.lastSyncDuration = duration;
+          syncState.totalSyncs += 1;
+          syncState.totalProductsProcessed +=
+            syncState.lastSyncStats.productsProcessed;
+          syncState.totalProductsCreated +=
+            syncState.lastSyncStats.productsCreated;
+          syncState.totalProductsUpdated +=
+            syncState.lastSyncStats.productsUpdated;
+          syncState.totalProductsDeleted +=
+            syncState.lastSyncStats.productsDeleted;
+          syncState.lastSyncStats.completedAt = new Date();
+
+          // Save the final state with extra logging and error handling
+          try {
+            await syncState.save();
+            logger.info("Successfully saved final sync state", { syncStateId });
+          } catch (finalSaveError) {
+            logger.error(
+              `CRITICAL ERROR: Failed to save final sync state: ${finalSaveError.message}`,
+              finalSaveError
+            );
+
+            // Try one more time with only essential fields
+            try {
+              await SyncStateModel.updateOne(
+                { _id: syncState._id },
+                {
+                  $set: {
+                    isInProgress: false, // Critical field to update
+                    lastSyncedAt: new Date(),
+                    lastSyncDuration: duration,
+                    "lastSyncStats.completedAt": new Date(),
+                  },
+                }
+              );
+              logger.info(
+                "Updated sync state with minimal fields after save error"
+              );
+            } catch (fallbackError) {
+              logger.error(
+                "Failed fallback update of sync state",
+                fallbackError
+              );
+
+              // Last resort - direct update to set isInProgress to false
+              try {
+                await SyncStateModel.updateOne(
+                  { _id: syncState._id },
+                  { $set: { isInProgress: false } }
+                );
+                logger.info("Last resort update of isInProgress successful");
+              } catch (lastError) {
+                logger.error(
+                  "All attempts to update sync state failed",
+                  lastError
+                );
+              }
+            }
+          }
+
+          logger.info("Product sync completed", {
+            syncStateId,
+            productsProcessed: syncState.lastSyncStats.productsProcessed,
+            productsUpdated: syncState.lastSyncStats.productsUpdated,
+            productsCreated: syncState.lastSyncStats.productsCreated,
+            productsDeleted: syncState.lastSyncStats.productsDeleted,
+            errors: syncState.lastSyncStats.errors.length,
+            durationMs: duration,
+            durationFormatted: `${Math.floor(duration / 60000)}m ${Math.floor(
+              (duration % 60000) / 1000
+            )}s`,
+          });
+        } catch (finalError) {
           logger.error(
-            `CRITICAL ERROR: Failed to save final sync state: ${finalSaveError.message}`,
-            finalSaveError
+            `Error in final sync completion processing: ${finalError.message}`,
+            finalError
           );
 
-          // Try one more time with only essential fields
+          // Even if we have an error, make sure to set isInProgress to false
           try {
             await SyncStateModel.updateOne(
               { _id: syncState._id },
-              {
-                $set: {
-                  isInProgress: false,
-                  lastSyncedAt: new Date(),
-                  lastSyncDuration: duration,
-                  "lastSyncStats.completedAt": new Date(),
-                },
-              }
+              { $set: { isInProgress: false } }
             );
-            logger.info(
-              "Updated sync state with minimal fields after save error"
+            logger.info("Updated isInProgress to false after error");
+          } catch (updateError) {
+            logger.error(
+              "Failed to update isInProgress after error",
+              updateError
             );
-          } catch (fallbackError) {
-            logger.error("Failed fallback update of sync state", fallbackError);
           }
         }
+      }
+    } catch (overallError) {
+      logger.error(
+        `Overall error in batch completion handler: ${overallError.message}`,
+        overallError
+      );
 
-        logger.info("Product sync completed", {
-          syncStateId,
-          productsProcessed: syncState.lastSyncStats.productsProcessed,
-          productsUpdated: syncState.lastSyncStats.productsUpdated,
-          productsCreated: syncState.lastSyncStats.productsCreated,
-          productsDeleted: syncState.lastSyncStats.productsDeleted,
-          errors: syncState.lastSyncStats.errors.length,
-          durationMs: duration,
-          durationFormatted: `${Math.floor(duration / 60000)}m ${Math.floor(
-            (duration % 60000) / 1000
-          )}s`,
-        });
-      } catch (finalError) {
+      // Set isInProgress to false as a failsafe
+      try {
+        await SyncStateModel.updateOne(
+          { _id: syncState._id },
+          { $set: { isInProgress: false } }
+        );
+        logger.info("Reset isInProgress to false after handler error");
+      } catch (resetError) {
         logger.error(
-          `Error in final sync completion processing: ${finalError.message}`,
-          finalError
+          "Failed to reset isInProgress after handler error",
+          resetError
         );
       }
     }
@@ -583,6 +715,7 @@ export function initSyncWorkers() {
   syncQueueEvents.on("failed", async ({ jobId, failedReason }) => {
     logger.error(`Sync job ${jobId} failed:`, failedReason);
   });
+
   batchQueueEvents.on("failed", async ({ jobId, failedReason }) => {
     logger.error(`Batch job ${jobId} failed:`, failedReason);
 
@@ -596,10 +729,15 @@ export function initSyncWorkers() {
     const syncState = await SyncStateModel.findById(syncStateId);
     if (!syncState) return;
 
-    // Update batch job status
-    if (syncState.lastSyncStats.batchJobs) {
-      syncState.lastSyncStats.batchJobs.failed += 1;
-      syncState.lastSyncStats.batchJobs.pending -= 1;
+    // Update batch job status - using object format
+    if (
+      syncState.lastSyncStats.batchJobs &&
+      typeof syncState.lastSyncStats.batchJobs === "object" &&
+      !Array.isArray(syncState.lastSyncStats.batchJobs)
+    ) {
+      const batchJobs = syncState.lastSyncStats.batchJobs as any;
+      batchJobs.failed += 1;
+      batchJobs.pending -= 1;
 
       // Add error
       syncState.lastSyncStats.errors.push({
@@ -610,11 +748,7 @@ export function initSyncWorkers() {
       await syncState.save();
 
       // Check if all batches are now complete (including failed ones)
-      if (
-        syncState.lastSyncStats.batchJobs.completed +
-          syncState.lastSyncStats.batchJobs.failed ===
-        syncState.lastSyncStats.batchJobs.total
-      ) {
+      if (batchJobs.completed + batchJobs.failed === batchJobs.total) {
         logger.info(
           `All batch jobs completed (including failures) for sync ${syncStateId}`
         );
@@ -638,8 +772,8 @@ export function initSyncWorkers() {
         syncState.lastSyncStats.completedAt = new Date();
 
         // Add an error indicating that not all batches succeeded
-        if (syncState.lastSyncStats.batchJobs.failed > 0) {
-          syncState.lastSyncError = `Sync completed with ${syncState.lastSyncStats.batchJobs.failed} failed batch jobs`;
+        if (batchJobs.failed > 0) {
+          syncState.lastSyncError = `Sync completed with ${batchJobs.failed} failed batch jobs`;
         }
 
         await syncState.save();
@@ -649,13 +783,14 @@ export function initSyncWorkers() {
           productsProcessed: syncState.lastSyncStats.productsProcessed,
           productsUpdated: syncState.lastSyncStats.productsUpdated,
           productsCreated: syncState.lastSyncStats.productsCreated,
-          failedBatches: syncState.lastSyncStats.batchJobs.failed,
+          failedBatches: batchJobs.failed,
           errors: syncState.lastSyncStats.errors.length,
           durationMs: duration,
         });
       }
     }
   });
+
   // Return the workers and queues for cleanup
   return {
     syncWorker,
@@ -667,7 +802,7 @@ export function initSyncWorkers() {
   };
 }
 
-// Function to add a sync job to the queue
+// Modify the queueProductSync function to include a check for stuck jobs
 export async function queueProductSync(
   storeId: string,
   shopCredentials: {
@@ -681,6 +816,9 @@ export async function queueProductSync(
     forceFullSync?: boolean;
   } = {}
 ): Promise<{ jobId: string; syncStateId: string }> {
+  // First, reset any stuck jobs
+  await resetIncompleteJobs();
+
   // Get or create sync state
   let syncState = await SyncStateModel.findOne({
     storeId,
@@ -692,36 +830,38 @@ export async function queueProductSync(
       storeId,
       syncType: "products",
       totalSyncs: 0,
-      lastSyncStats: {
-        // errors: [],
-      },
+      lastSyncStats: {},
     });
   }
 
-  // Check if sync is already in progress TODO: fix uncomment code
-  //   if (syncState.isInProgress) {
-  //     throw new Error("A product sync is already in progress for this store");
-  //   }
+  // Check if sync is already in progress
+  if (syncState.isInProgress) {
+    // Check if it's a stale job (started more than 1 hour ago)
+    const staleThreshold = 60 * 60 * 1000; // 1 hour in milliseconds
+    if (
+      syncState.lastSyncStats &&
+      syncState.lastSyncStats.startedAt &&
+      Date.now() - syncState.lastSyncStats.startedAt.getTime() > staleThreshold
+    ) {
+      logger.warn(`Resetting stale sync job for store ${storeId}`);
+      syncState.isInProgress = false;
+      syncState.lastSyncError = "Previous sync was reset due to timeout";
+    } else {
+      throw new Error("A product sync is already in progress for this store");
+    }
+  }
 
   // Prepare for new sync
   syncState.isInProgress = true;
   syncState.lastSyncStats = {
     startedAt: new Date(),
-    completedAt: new Date(), // Will be updated later
-    totalProductsToProcess: 0,
+    completedAt: null, // Set to null initially, will be updated on completion
     productsProcessed: 0,
     productsCreated: 0,
     productsUpdated: 0,
     productsDeleted: 0,
     errors: [],
-    batchJobs: {
-      total: 0,
-      completed: 0,
-      failed: 0,
-      pending: 0,
-      ids: [],
-    },
-    existingProductIds: [],
+    batchJobs: [], // Start with an empty array for batch jobs
   };
   await syncState.save();
 
@@ -809,4 +949,82 @@ export async function shutdownSyncWorkers() {
   await productBatchQueue.close();
 
   logger.info("Sync workers and queues shut down");
+}
+
+// Clean up stuck sync jobs utility function
+export async function cleanupStuckSyncJobs() {
+  try {
+    const oneHourAgo = new Date();
+    oneHourAgo.setHours(oneHourAgo.getHours() - 1);
+
+    // Find all sync states that have been in progress for more than an hour
+    const stuckSyncs = await SyncStateModel.find({
+      isInProgress: true,
+      "lastSyncStats.startedAt": { $lt: oneHourAgo },
+    });
+
+    logger.info(
+      `Found ${stuckSyncs.length} sync jobs stuck for more than an hour`
+    );
+
+    // Reset each one
+    for (const sync of stuckSyncs) {
+      logger.warn(
+        `Resetting stuck sync job ${sync._id} for store ${sync.storeId}`
+      );
+
+      // Check if there are any batch jobs in progress
+      let inProgressJobs = 0;
+
+      // Handle both array and object formats
+      if (Array.isArray(sync.lastSyncStats.batchJobs)) {
+        for (const job of sync.lastSyncStats.batchJobs) {
+          if (job.status !== "completed" && job.status !== "failed") {
+            // Mark any pending jobs as failed
+            job.status = "failed";
+            job.error = "Timed out after 1 hour";
+            inProgressJobs++;
+          }
+        }
+      } else if (
+        sync.lastSyncStats.batchJobs &&
+        typeof sync.lastSyncStats.batchJobs === "object"
+      ) {
+        // For object format
+        const batchJobs = sync.lastSyncStats.batchJobs as any;
+        inProgressJobs = batchJobs.pending || 0;
+
+        if (inProgressJobs > 0) {
+          batchJobs.failed = (batchJobs.failed || 0) + inProgressJobs;
+          batchJobs.pending = 0;
+        }
+      }
+
+      if (inProgressJobs > 0) {
+        logger.info(
+          `Marked ${inProgressJobs} in-progress batch jobs as failed`
+        );
+      }
+
+      // Reset the job state
+      sync.isInProgress = false;
+      sync.lastSyncError = "Sync was reset due to timeout (stuck for >1 hour)";
+
+      // Calculate partial duration
+      if (sync.lastSyncStats && sync.lastSyncStats.startedAt) {
+        const duration =
+          oneHourAgo.getTime() - sync.lastSyncStats.startedAt.getTime();
+        sync.lastSyncDuration = duration;
+        sync.lastSyncStats.completedAt = new Date();
+      }
+
+      // Save the updated state
+      await sync.save();
+    }
+
+    return stuckSyncs.length;
+  } catch (error) {
+    logger.error("Error cleaning up stuck sync jobs:", error);
+    return -1;
+  }
 }

@@ -11,14 +11,31 @@ export interface ISyncState extends Document {
   totalProductsCreated: number; // Total products created
   totalProductsUpdated: number; // Total products updated
   totalProductsDeleted: number; // Total products deleted (if applicable)
+  testMessage?: string; // Test field used in code
   lastSyncStats: {
-    // Stats from the last sync
     startedAt: Date;
-    completedAt: Date;
+    completedAt: Date | null;
+    totalProductsToProcess?: number; // Total products to process in this sync
+    existingProductIds?: string[]; // IDs of products that exist before sync (for deletion detection)
     productsProcessed: number;
     productsCreated: number;
     productsUpdated: number;
     productsDeleted: number;
+    // Both batchJobs formats are used in different parts of the code
+    // Object format for numerical tracking
+    batchJobs?: {
+      total: number;
+      completed: number;
+      failed: number;
+      pending: number;
+      ids: string[];
+    };
+    // OR Array format for detailed tracking
+    batchJobs?: Array<{
+      jobId: string;
+      status: string; // e.g., 'completed', 'failed', 'pending'
+      error?: string; // Error message if job failed
+    }>;
     errors: Array<{
       productId: string;
       error: string;
@@ -40,13 +57,18 @@ const SyncStateSchema = new Schema<ISyncState>({
   totalProductsCreated: { type: Number, default: 0 },
   totalProductsUpdated: { type: Number, default: 0 },
   totalProductsDeleted: { type: Number, default: 0 },
+  testMessage: { type: String },
   lastSyncStats: {
     startedAt: { type: Date },
-    completedAt: { type: Date },
+    completedAt: { type: Date, default: null },
+    totalProductsToProcess: { type: Number },
+    existingProductIds: [{ type: String }],
     productsProcessed: { type: Number, default: 0 },
     productsCreated: { type: Number, default: 0 },
     productsUpdated: { type: Number, default: 0 },
     productsDeleted: { type: Number, default: 0 },
+    // Using Mixed type to support both object and array formats
+    batchJobs: { type: Schema.Types.Mixed, default: [] },
     errors: [
       {
         productId: { type: String },
