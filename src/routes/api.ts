@@ -1,16 +1,12 @@
 // src/routes/api.ts
 import express, { Request, Response, NextFunction } from "express";
-import { ShopifyAPI } from "../services/shopify-api";
-import { QueueService } from "../services/queue";
-import { JobTracker } from "../services/job-tracker";
-import { ProductFilters } from "../types";
 import logger from "../utils/logger";
-import { SyncStateModel } from "../models/sync-state";
-import { getSyncQueueStats, queueProductSync } from "../services/sync-queue";
+import { IntegrationJobProcessor } from "../queues/IntegrationJobProcessor";
+import { JobState } from "../models/JobState";
+import { ProductModel } from "../models/product";
 
 const router = express.Router();
 
-// Middleware to validate Shopify credentials - fixed TypeScript typing
 // Middleware to validate Shopify credentials using headers
 const validateShopifyCredentials = (
   req: Request,
@@ -28,9 +24,8 @@ const validateShopifyCredentials = (
     });
     return;
   }
-
   // Add the credentials to the request for use in the route handlers
-  req.shopifyCredentials = {
+  (req as any).shopifyCredentials = {
     shopName,
     accessToken,
   };
@@ -38,665 +33,389 @@ const validateShopifyCredentials = (
   next();
 };
 
-// Middleware to validate job IDs - fixed TypeScript typing
-const validateJobId = async (
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> => {
-  const { jobId } = req.params;
-
-  if (!jobId) {
-    res.status(400).json({
-      success: false,
-      error: "Job ID is required",
-    });
-    return;
-  }
-
-  try {
-    const jobExists = await JobTracker.getJobStatus(jobId);
-    if (!jobExists) {
-      res.status(404).json({
-        success: false,
-        error: "Job not found",
-      });
-      return;
-    }
-    next();
-  } catch (error) {
-    res.status(404).json({
-      success: false,
-      error: "Job not found",
-    });
-    return;
-  }
-};
-
-// API endpoint to sync products with MongoDB using BullMQ
+// API endpoint to perform a full sync of products
 router.post(
   "/sync-products",
   validateShopifyCredentials,
-  async (req: Request, res: Response): Promise<void> => {
+  async (req: Request, res: Response) => {
     try {
-      // Get parameters from request
-      const {
-        filters = {},
-        limit = req.body.limit || 50,
-        batchSize = 100,
-        forceFullSync = false,
-      } = req.body;
-
-      // Get store identifier from shop credentials
-      const storeId = req.shopifyCredentials.shopName;
-
-      try {
-        // Queue the sync job
-        const { jobId, syncStateId } = await queueProductSync(
-          storeId,
-          req.shopifyCredentials,
-          {
-            filters,
-            limit,
-            batchSize,
-            forceFullSync,
-          }
-        );
-
-        // Get the sync state
-        const syncState = await SyncStateModel.findById(syncStateId);
-
-        // Send response
-        res.json({
-          success: true,
-          message: "Product sync queued",
-          jobId,
-          syncStateId,
-          syncState,
-          incremental: !forceFullSync && !!syncState?.lastSyncedAt,
-        });
-      } catch (queueError) {
-        const error = queueError as Error;
-        // If there's already a sync in progress, return 409 Conflict
-        if (error.message.includes("already in progress")) {
-          const syncState = await SyncStateModel.findOne({
-            storeId,
-            syncType: "products",
-            isInProgress: true,
-          });
-
-          res.status(409).json({
-            success: false,
-            error: error.message,
-            syncState,
-          });
-          return;
+      // Create a full sync job
+      const job = await IntegrationJobProcessor.createJob(
+        "shopify",
+        "mongodb",
+        {
+          options: {
+            // Add any job-specific options here
+            shopName: (req as any).shopifyCredentials.shopName,
+            accessToken: (req as any).shopifyCredentials.accessToken,
+          },
         }
+      );
 
-        // Otherwise rethrow the error
-        throw queueError;
-      }
-    } catch (error) {
-      logger.error("Failed to queue product sync:", error);
-      res.status(500).json({
-        success: false,
-        error:
-          error.message || "An error occurred while queuing the product sync",
-      });
-    }
-  }
-);
-
-// API endpoint to check sync status
-router.get(
-  "/sync-status",
-  validateShopifyCredentials,
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const storeId = req.shopifyCredentials.shopName;
-      const syncType = (req.query.type as string) || "products";
-
-      const syncState = await SyncStateModel.findOne({
-        storeId,
-        syncType,
-      });
-
-      if (!syncState) {
-        res.status(404).json({
-          success: false,
-          error: `No sync history found for ${syncType}`,
-        });
-        return;
-      }
-
-      // Get queue stats if the sync is in progress
-      let queueStats;
-      if (syncState.isInProgress) {
-        queueStats = await getSyncQueueStats();
-      }
+      // Start the worker
+      IntegrationJobProcessor.startWorker();
 
       res.json({
         success: true,
-        syncState,
-        queueStats,
+        message: "Full product sync started",
+        data: {
+          jobId: job.id,
+          type: "full",
+        },
       });
     } catch (error) {
-      logger.error("Error fetching sync status:", error);
+      logger.error("Error starting full product sync:", error);
       res.status(500).json({
         success: false,
-        error: error.message || "An error occurred while fetching sync status",
+        error: error instanceof Error ? error.message : "Unknown error",
       });
     }
   }
 );
 
-// API endpoint to get queue stats
-router.get(
-  "/sync-queue-stats",
-  validateShopifyCredentials,
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const stats = await getSyncQueueStats();
-
-      res.json({
-        success: true,
-        stats,
-      });
-    } catch (error) {
-      logger.error("Error fetching queue stats:", error);
-      res.status(500).json({
-        success: false,
-        error: error.message || "An error occurred while fetching queue stats",
-      });
-    }
-  }
-);
-
-// API endpoint to get product IDs
-router.get(
-  "/products",
-  validateShopifyCredentials,
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      // Get query parameters for filtering
-      const filters: ProductFilters = {
-        limit: req.query.limit ? parseInt(req.query.limit as string) : 50,
-        productType: (req.query.productType as string) || undefined,
-        vendor: (req.query.vendor as string) || undefined,
-        createdAtMin: (req.query.createdAtMin as string) || undefined,
-        createdAtMax: (req.query.createdAtMax as string) || undefined,
-        updatedAtMin: (req.query.updatedAtMin as string) || undefined,
-        updatedAtMax: (req.query.updatedAtMax as string) || undefined,
-      };
-
-      // Validate limit
-      if (filters.limit && (filters.limit > 250 || filters.limit < 1)) {
-        res.status(400).json({
-          success: false,
-          error: "Limit must be between 1 and 250",
-        });
-        return;
-      }
-
-      // Initialize Shopify API using the credentials from middleware
-      const shopify = new ShopifyAPI(req.shopifyCredentials);
-
-      // Get product IDs with the specified filters
-      logger.info("Fetching product IDs", { filters });
-      const productIds = await shopify.getProductIds(filters);
-
-      // Send response
-      res.json({
-        success: true,
-        count: productIds.length,
-        productIds: productIds,
-      });
-    } catch (error) {
-      logger.error("Error fetching product IDs:", error);
-      res.status(500).json({
-        success: false,
-        error: error.message || "An error occurred while fetching product IDs",
-      });
-    }
-  }
-);
-
-router.get(
-  "/shop",
+// API endpoint to perform an incremental sync of products
+router.post(
+  "/sync-products/incremental",
   validateShopifyCredentials,
   async (req: Request, res: Response) => {
     try {
-      const shopify = new ShopifyAPI(req.shopifyCredentials);
+      // Create an incremental sync job
+      const { job, isIncremental, previousSyncTime } =
+        await IntegrationJobProcessor.createIncrementalJob(
+          "shopify",
+          "mongodb",
+          {
+            options: {
+              // Add any job-specific options here
+              shopName: (req as any).shopifyCredentials.shopName,
+              accessToken: (req as any).shopifyCredentials.accessToken,
+            },
+          }
+        );
 
-      const shop = await shopify.getShopInfo();
-
-      console.log("Shop info:", shop);
-
-      return res.json({
-        success: true,
-        ...shop,
-      });
-    } catch (error) {
-      logger.error("Failed to fetch shop info:", error);
-      res.status(500).json({
-        success: false,
-        error: error.message || "An error occurred while fetching shop info",
-      });
-    }
-  }
-);
-
-// API endpoint to start a batch processing job - fixed TypeScript typing
-router.post(
-  "/process-products",
-  validateShopifyCredentials,
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { shopCredentials, processingAction, filters, actionData } =
-        req.body;
-
-      // Validate required action param
-      if (!processingAction) {
-        res.status(400).json({
-          success: false,
-          error: "Processing action is required",
-        });
-        return;
-      }
-
-      // Validate supported actions
-      const supportedActions = [
-        "updateTags",
-        "updateInventory",
-        "updatePrice",
-        "updateMetafield",
-      ];
-      if (!supportedActions.includes(processingAction)) {
-        res.status(400).json({
-          success: false,
-          error: `Unsupported action. Supported actions: ${supportedActions.join(
-            ", "
-          )}`,
-        });
-        return;
-      }
-
-      // Validate action-specific data
-      if (
-        processingAction === "updateTags" &&
-        (!actionData?.tags || !Array.isArray(actionData.tags))
-      ) {
-        res.status(400).json({
-          success: false,
-          error: "Tags array is required for updateTags action",
-        });
-        return;
-      }
-
-      if (
-        processingAction === "updateInventory" &&
-        (actionData?.inventory === undefined ||
-          typeof actionData.inventory !== "number")
-      ) {
-        res.status(400).json({
-          success: false,
-          error: "Inventory number is required for updateInventory action",
-        });
-        return;
-      }
-
-      if (
-        processingAction === "updatePrice" &&
-        (actionData?.price === undefined ||
-          typeof actionData.price !== "number")
-      ) {
-        res.status(400).json({
-          success: false,
-          error: "Price number is required for updatePrice action",
-        });
-        return;
-      }
-
-      if (
-        processingAction === "updateMetafield" &&
-        (!actionData?.namespace ||
-          !actionData?.key ||
-          !actionData?.value ||
-          !actionData?.type)
-      ) {
-        res.status(400).json({
-          success: false,
-          error:
-            "Namespace, key, value, and type are required for updateMetafield action",
-        });
-        return;
-      }
-
-      logger.info("Starting batch processing job", {
-        action: processingAction,
-        shop: shopCredentials.shopName,
-        filters,
-      });
-
-      // Initialize the Shopify API service
-      const shopify = new ShopifyAPI(shopCredentials);
-
-      // Get product IDs based on filters
-      const productIds = await shopify.getProductIds(filters || {});
-
-      if (productIds.length === 0) {
-        res.status(400).json({
-          success: false,
-          error: "No products found with the specified filters",
-        });
-        return;
-      }
-
-      // Create a new job in the tracker
-      const jobId = await JobTracker.createJob({
-        totalProducts: productIds.length,
-        status: "queued",
-        action: processingAction,
-        timestamp: new Date(),
-      });
-
-      // Prepare tasks for the queue
-      const tasks = productIds.map((id) => ({
-        productId: id,
-        action: processingAction,
-        jobId,
-        shopCredentials,
-        ...actionData,
-      }));
-
-      // Add products to the queue
-      await QueueService.addBatch(tasks);
-
-      logger.info(`Created job ${jobId} with ${productIds.length} products`);
+      // Start the worker
+      IntegrationJobProcessor.startWorker();
 
       res.json({
         success: true,
-        jobId,
-        totalProducts: productIds.length,
+        message: isIncremental
+          ? "Incremental product sync started"
+          : "No previous sync found, starting full sync",
+        data: {
+          jobId: job.id,
+          type: isIncremental ? "incremental" : "full",
+          previousSyncTime,
+        },
       });
     } catch (error) {
-      logger.error("Failed to start processing job:", error);
+      logger.error("Error starting incremental product sync:", error);
       res.status(500).json({
         success: false,
-        error: error.message || "An error occurred while starting the job",
+        error: error instanceof Error ? error.message : "Unknown error",
       });
     }
   }
 );
 
-// API endpoint to check job status - fixed TypeScript typing
-router.get(
-  "/job/:jobId",
-  validateJobId,
-  async (req: Request, res: Response): Promise<void> => {
+// API endpoint to resume a failed job
+router.post(
+  "/sync-products/resume/:jobId",
+  validateShopifyCredentials,
+  async (req: Request, res: Response) => {
     try {
       const { jobId } = req.params;
-      const jobStatus = await JobTracker.getJobStatus(jobId);
-      res.json(jobStatus);
-    } catch (error) {
-      logger.error(`Error fetching job status for ${req.params.jobId}:`, error);
-      res.status(500).json({
-        success: false,
-        error: error.message || "An error occurred while fetching job status",
-      });
-    }
-  }
-);
 
-// API endpoint to get detailed job info - fixed TypeScript typing
-router.get(
-  "/job/:jobId/details",
-  validateJobId,
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { jobId } = req.params;
-      const jobDetails = await JobTracker.getJobDetails(jobId);
+      // Find the job in the database
+      const jobState = await JobState.findOne({ jobId });
 
-      if (!jobDetails) {
-        res.status(404).json({
+      if (!jobState) {
+        return res.status(404).json({
           success: false,
-          error: "Job not found",
+          error: `Job with ID ${jobId} not found`,
         });
-        return;
       }
 
-      res.json(jobDetails);
+      if (jobState.status !== "FAILED") {
+        return res.status(400).json({
+          success: false,
+          error: `Can only resume failed jobs. Current status: ${jobState.status}`,
+        });
+      }
+
+      // Update job status back to CREATED to allow resuming
+      await JobState.findByIdAndUpdate(jobState._id, {
+        status: "CREATED",
+        // Don't reset progress - we'll resume from where we left off
+      });
+
+      // Add the job back to the queue
+      const job = await IntegrationJobProcessor.resumeJob(jobId, {
+        options: {
+          // Add any job-specific options here
+          shopName: (req as any).shopifyCredentials.shopName,
+          accessToken: (req as any).shopifyCredentials.accessToken,
+        },
+      });
+
+      // Start the worker
+      IntegrationJobProcessor.startWorker();
+
+      res.json({
+        success: true,
+        message: "Job resumed successfully",
+        data: {
+          jobId: job.id,
+          resumedFrom: jobState.progress,
+        },
+      });
     } catch (error) {
-      logger.error(
-        `Error fetching job details for ${req.params.jobId}:`,
-        error
-      );
+      logger.error("Error resuming job:", error);
       res.status(500).json({
         success: false,
-        error: error.message || "An error occurred while fetching job details",
+        error: error instanceof Error ? error.message : "Unknown error",
       });
     }
   }
 );
 
-// API endpoint to list jobs - fixed TypeScript typing
-router.get("/jobs", async (req: Request, res: Response): Promise<void> => {
+// API endpoint to get sync status information
+router.get("/sync-status", async (req: Request, res: Response) => {
   try {
-    const limit = parseInt(req.query.limit as string) || 10;
-    const skip = parseInt(req.query.skip as string) || 0;
+    const syncInfo = await IntegrationJobProcessor.getLatestSyncInfo(
+      "shopify",
+      "mongodb"
+    );
 
-    if (limit > 100) {
-      res.status(400).json({
-        success: false,
-        error: "Limit cannot exceed 100",
-      });
-      return;
-    }
-
-    const jobs = await JobTracker.listJobs(limit, skip);
     res.json({
       success: true,
-      total: jobs.length,
-      limit,
-      skip,
-      jobs,
+      data: syncInfo,
     });
   } catch (error) {
-    logger.error("Error listing jobs:", error);
+    logger.error("Error getting sync status:", error);
     res.status(500).json({
       success: false,
-      error: error.message || "An error occurred while listing jobs",
+      error: error instanceof Error ? error.message : "Unknown error",
     });
   }
 });
 
-// API endpoint to delete a job - fixed TypeScript typing
-router.delete(
-  "/job/:jobId",
-  validateJobId,
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const { jobId } = req.params;
-      const deleted = await JobTracker.deleteJob(jobId);
+// API endpoint to get all jobs with their status
+router.get("/sync-jobs", async (req: Request, res: Response) => {
+  try {
+    // Get query parameters for filtering
+    const status = req.query.status as string | undefined;
+    const limit = parseInt((req.query.limit as string) || "10");
+    const page = parseInt((req.query.page as string) || "1");
 
-      if (!deleted) {
-        res.status(404).json({
-          success: false,
-          error: "Job not found",
-        });
-        return;
-      }
-
-      logger.info(`Deleted job ${jobId}`);
-      res.json({ success: true });
-    } catch (error) {
-      logger.error(`Error deleting job ${req.params.jobId}:`, error);
-      res.status(500).json({
-        success: false,
-        error: error.message || "An error occurred while deleting the job",
-      });
+    // Build the query
+    const query: any = {};
+    if (status) {
+      query.status = status.toUpperCase();
     }
-  }
-);
 
-// API endpoint to get queue stats - fixed TypeScript typing
-router.get(
-  "/queue/stats",
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      const stats = await QueueService.getQueueStats();
-      res.json({
+    // Calculate pagination
+    const skip = (page - 1) * limit;
+
+    // Get jobs with pagination
+    const jobs = await JobState.find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    // Get total count for pagination
+    const totalCount = await JobState.countDocuments(query);
+
+    res.json({
+      success: true,
+      data: {
+        jobs,
+        pagination: {
+          total: totalCount,
+          page,
+          limit,
+          pages: Math.ceil(totalCount / limit),
+        },
+      },
+    });
+  } catch (error) {
+    logger.error("Error getting jobs:", error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+// API endpoint for diagnostics to check database operations
+router.get("/sync-diagnostics", async (req: Request, res: Response) => {
+  try {
+    const storeId =
+      (req.query.storeId as string) ||
+      process.env.SHOPIFY_HOST ||
+      "default-store";
+    const productId = req.query.productId as string;
+
+    // Test direct write to database
+    if (productId) {
+      // Create a test product
+      const testProduct = new ProductModel({
+        storeId,
+        productId: `test-${productId}`,
+        title: `Test Product ${Date.now()}`,
+        handle: `test-product-${Date.now()}`,
+        variants: [
+          {
+            variantId: `test-variant-${Date.now()}`,
+            price: "9.99",
+            sku: `TEST-SKU-${Date.now()}`,
+          },
+        ],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        shopifyCreatedAt: new Date(),
+        shopifyUpdatedAt: new Date(),
+      });
+
+      // Try to save it
+      const savedProduct = await testProduct.save();
+
+      return res.json({
         success: true,
-        stats,
-      });
-    } catch (error) {
-      logger.error("Error fetching queue stats:", error);
-      res.status(500).json({
-        success: false,
-        error: error.message || "An error occurred while fetching queue stats",
-      });
-    }
-  }
-);
-
-// API endpoints to control the queue - fixed TypeScript typing
-router.post(
-  "/queue/pause",
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      await QueueService.pauseQueue();
-      logger.info("Queue paused");
-      res.json({ success: true, message: "Queue paused" });
-    } catch (error) {
-      logger.error("Error pausing queue:", error);
-      res.status(500).json({
-        success: false,
-        error: error.message || "An error occurred while pausing the queue",
+        message: "Test product saved successfully",
+        product: savedProduct,
+        diagnostics: {
+          dbConnection: "Connected",
+          writeTest: "Successful",
+        },
       });
     }
-  }
-);
 
-router.post(
-  "/queue/resume",
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      await QueueService.resumeQueue();
-      logger.info("Queue resumed");
-      res.json({ success: true, message: "Queue resumed" });
-    } catch (error) {
-      logger.error("Error resuming queue:", error);
-      res.status(500).json({
-        success: false,
-        error: error.message || "An error occurred while resuming the queue",
-      });
+    // Get database stats
+    const totalProducts = await ProductModel.countDocuments({ storeId });
+    const recentProducts = await ProductModel.find({ storeId })
+      .sort({ createdAt: -1 })
+      .limit(5);
+
+    // Get database connection status
+    const dbState = mongoose.connection.readyState;
+    let dbStateText;
+    switch (dbState) {
+      case 0:
+        dbStateText = "Disconnected";
+        break;
+      case 1:
+        dbStateText = "Connected";
+        break;
+      case 2:
+        dbStateText = "Connecting";
+        break;
+      case 3:
+        dbStateText = "Disconnecting";
+        break;
+      default:
+        dbStateText = "Unknown";
     }
+
+    // Get ongoing jobs
+    const runningJobs = await JobState.find({ status: "RUNNING" })
+      .sort({ createdAt: -1 })
+      .limit(5);
+
+    // Get latest completed job
+    const latestJob = await JobState.findOne({ status: "COMPLETED" }).sort({
+      updatedAt: -1,
+    });
+
+    res.json({
+      success: true,
+      diagnostics: {
+        database: {
+          connectionState: dbStateText,
+          readyState: dbState,
+        },
+        products: {
+          totalCount: totalProducts,
+          recentProducts: recentProducts.map((p) => ({
+            id: p.productId,
+            title: p.title,
+            createdAt: p.createdAt,
+            updatedAt: p.updatedAt,
+          })),
+        },
+        jobs: {
+          running: runningJobs.map((j) => ({
+            jobId: j.jobId,
+            progress: j.progress,
+            createdAt: j.createdAt,
+            recordsProcessed: j.recordsSucceeded,
+          })),
+          latestCompleted: latestJob
+            ? {
+                jobId: latestJob.jobId,
+                completedAt: latestJob.updatedAt,
+                recordsProcessed: latestJob.recordsSucceeded,
+                lastSyncTime: latestJob.lastSyncTime,
+              }
+            : null,
+        },
+      },
+    });
+  } catch (error) {
+    logger.error("Error running diagnostics:", error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+      stack: error instanceof Error ? error.stack : undefined,
+    });
   }
-);
+});
 
-router.post(
-  "/queue/clear",
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      await QueueService.clearQueue();
-      logger.info("Queue cleared");
-      res.json({ success: true, message: "Queue cleared" });
-    } catch (error) {
-      logger.error("Error clearing queue:", error);
-      res.status(500).json({
-        success: false,
-        error: error.message || "An error occurred while clearing the queue",
-      });
-    }
+// Add a direct test route for database operations
+router.post("/test-db-write", async (req: Request, res: Response) => {
+  try {
+    const { storeId = "test-store", productId = `test-${Date.now()}` } =
+      req.body;
+
+    // Create a test product
+    const testProduct = new ProductModel({
+      storeId,
+      productId,
+      title: `Test Product ${productId}`,
+      handle: `test-product-${productId}`,
+      variants: [
+        {
+          variantId: `test-variant-${Date.now()}`,
+          price: "9.99",
+          sku: `TEST-SKU-${Date.now()}`,
+        },
+      ],
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      shopifyCreatedAt: new Date(),
+      shopifyUpdatedAt: new Date(),
+    });
+
+    // Save it
+    const savedProduct = await testProduct.save();
+
+    // Verify it was saved by querying it back
+    const verifiedProduct = await ProductModel.findOne({ storeId, productId });
+
+    res.json({
+      success: true,
+      message: "Test product saved and verified",
+      product: savedProduct,
+      verified: !!verifiedProduct,
+      verifiedProduct,
+    });
+  } catch (error) {
+    logger.error("Error testing database write:", error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+      stack: error instanceof Error ? error.stack : undefined,
+    });
   }
-);
-
-// API endpoint to manually check and fix stuck syncs
-router.post(
-  "/fix-stuck-syncs",
-  validateShopifyCredentials,
-  async (req: Request, res: Response): Promise<void> => {
-    try {
-      // Find syncs that are in progress
-      const stuckSyncs = await SyncStateModel.find({
-        isInProgress: true,
-      });
-
-      const results = [];
-
-      // For each stuck sync, check if all batch jobs are completed
-      for (const syncState of stuckSyncs) {
-        // Check when this sync was started
-        const startTime = syncState.lastSyncStats.startedAt?.getTime() || 0;
-        const duration = Date.now() - startTime;
-        const durationMinutes = Math.floor(duration / 60000);
-
-        // Check batch job status
-        const batchJobsTotal = syncState.lastSyncStats.batchJobs?.total || 0;
-        const batchJobsCompleted =
-          syncState.lastSyncStats.batchJobs?.completed || 0;
-        const batchJobsFailed = syncState.lastSyncStats.batchJobs?.failed || 0;
-
-        const allBatchesComplete =
-          batchJobsTotal > 0 &&
-          batchJobsCompleted + batchJobsFailed >= batchJobsTotal;
-
-        // If all batches are complete or it's been stuck for over 30 minutes
-        if (allBatchesComplete || durationMinutes > 30) {
-          // Mark as complete
-          syncState.isInProgress = false;
-          syncState.lastSyncedAt = new Date();
-          syncState.lastSyncDuration = duration;
-          syncState.totalSyncs += 1;
-          syncState.totalProductsProcessed +=
-            syncState.lastSyncStats.productsProcessed;
-          syncState.totalProductsCreated +=
-            syncState.lastSyncStats.productsCreated;
-          syncState.totalProductsUpdated +=
-            syncState.lastSyncStats.productsUpdated;
-          syncState.lastSyncStats.completedAt = new Date();
-
-          if (!allBatchesComplete) {
-            syncState.lastSyncError = `Sync automatically marked as complete after ${durationMinutes} minutes`;
-          }
-
-          await syncState.save();
-          logger.info(
-            `Sync ${syncState._id} marked as complete after ${durationMinutes} minutes`
-          );
-
-          results.push({
-            id: syncState._id,
-            storeId: syncState.storeId,
-            fixed: true,
-            reason: allBatchesComplete ? "All batches complete" : "Timeout",
-            duration: `${durationMinutes} minutes`,
-          });
-        } else {
-          results.push({
-            id: syncState._id,
-            storeId: syncState.storeId,
-            fixed: false,
-            status: {
-              duration: `${durationMinutes} minutes`,
-              batches: `${batchJobsCompleted}/${batchJobsTotal} completed, ${batchJobsFailed} failed`,
-            },
-          });
-        }
-      }
-
-      res.json({
-        success: true,
-        syncsChecked: stuckSyncs.length,
-        results,
-      });
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
-  }
-);
+});
 
 export default router;

@@ -4,20 +4,11 @@ import cors from "cors";
 import helmet from "helmet";
 import mongoose from "mongoose";
 import apiRoutes from "./routes/api";
-import { QueueService } from "./services/queue";
-import { WorkerService } from "./workers/product-worker";
-import { initSyncWorkers, shutdownSyncWorkers } from "./services/sync-queue";
-import { initializeDatabase } from "./db/init-mongodb";
 import config from "./config";
 import logger from "./utils/logger";
 
 // Initialize Express app
 const app = express();
-
-// Initialize workers
-const workers = initSyncWorkers();
-
-console.log("Sync workers initialized:", workers);
 
 // Apply middleware
 app.use(helmet());
@@ -83,14 +74,6 @@ async function startServer() {
     await mongoose.connect(config.db.uri);
     logger.info("Connected to MongoDB");
 
-    // Initialize database
-    await initializeDatabase();
-    logger.info("Database initialization completed");
-
-    // Initialize queue service with worker
-    QueueService.initialize(WorkerService.processProduct);
-    logger.info("Queue service initialized");
-
     // Start server
     const PORT = config.server.port;
     app.listen(PORT, () => {
@@ -110,10 +93,8 @@ startServer();
 // Graceful shutdown
 process.on("SIGTERM", async () => {
   logger.info("SIGTERM received, shutting down gracefully");
-  await QueueService.closeQueue();
   await mongoose.connection.close();
   logger.info("Server shutdown complete");
-  await shutdownSyncWorkers();
   logger.info("Sync workers shutdown complete");
 
   process.exit(0);
@@ -121,7 +102,6 @@ process.on("SIGTERM", async () => {
 
 process.on("SIGINT", async () => {
   logger.info("SIGINT received, shutting down gracefully");
-  await QueueService.closeQueue();
   await mongoose.connection.close();
   logger.info("Server shutdown complete");
   process.exit(0);

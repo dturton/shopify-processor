@@ -2,6 +2,7 @@
 import mongoose, { Schema, Document } from "mongoose";
 
 export interface IProduct extends Document {
+  storeId: string;
   productId: string;
   title: string;
   description?: string;
@@ -24,6 +25,7 @@ export interface IProduct extends Document {
 }
 
 const ProductSchema = new Schema<IProduct>({
+  storeId: { type: String, required: true },
   productId: { type: String, required: true, unique: true },
   title: { type: String, required: true },
   description: { type: String },
@@ -48,7 +50,9 @@ const ProductSchema = new Schema<IProduct>({
 });
 
 // Add indexes for common queries
+ProductSchema.index({ storeId: 1 });
 ProductSchema.index({ productId: 1 });
+ProductSchema.index({ storeId: 1, productId: 1 }, { unique: true });
 ProductSchema.index({ productType: 1 });
 ProductSchema.index({ vendor: 1 });
 ProductSchema.index({ "variants.variantId": 1 });

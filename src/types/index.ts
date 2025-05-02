@@ -1,64 +1,41 @@
-export interface ShopifyCredentials {
-  shopName: string;
-  accessToken: string;
-  apiKey?: string;
-  apiSecret?: string;
+// src/types/index.ts
+export interface SyncContext {
+  // Methods for tracking metrics
+  recordTotalCount(count: number): void;
+  recordSuccess(count?: number): void;
+  recordFailure(count?: number): void;
+  updateProgress(progress: number): void;
+
+  // Methods for data collection
+  collectRecords(records: any[], modelName: string): void;
+
+  // Methods for accessing configuration
+  getConfig(): any;
+
+  // Logger
+  log(
+    level: "info" | "error" | "warn" | "debug",
+    message: string,
+    meta?: any
+  ): void;
+
+  // Get the current metrics
+  getMetrics(): SyncMetrics;
+
+  // Store and retrieve metadata
+  setMetadata(key: string, value: any): void;
+  getMetadata(key: string): any;
 }
 
-// Add shopifyCredentials to Express Request
-declare global {
-  namespace Express {
-    interface Request {
-      shopifyCredentials?: ShopifyCredentials;
-    }
-  }
-}
-
-export interface ProductTask {
-  productId: string;
-  action: string;
-  jobId: string;
-  shopCredentials: ShopifyCredentials;
-  [key: string]: any; // Additional action-specific parameters
-}
-
-export interface JobData {
-  jobId: string;
-  totalProducts: number;
-  status: "queued" | "processing" | "completed" | "failed";
-  action: string;
-  timestamp: Date;
-  products?: ProductStatus[];
-}
-
-export interface ProductStatus {
-  productId: string;
-  status: "queued" | "processing" | "completed" | "failed";
-  result?: any;
-  error?: string;
-}
-
-export interface JobStatus {
-  jobId: string;
-  status: string;
-  progress: {
-    total: number;
-    completed: number;
-    failed: number;
-    pending: number;
+export interface SyncMetrics {
+  totalRecords: number;
+  recordsSucceeded: number;
+  recordsFailed: number;
+  progress: number;
+  collectedRecords: {
+    [modelName: string]: any[];
   };
-  action: string;
-  timestamp: Date;
-}
-
-export interface ProductFilters {
-  limit?: number;
-  collectionId?: string;
-  productType?: string;
-  tags?: string[];
-  vendor?: string;
-  createdAtMin?: string;
-  createdAtMax?: string;
-  updatedAtMin?: string;
-  updatedAtMax?: string;
+  metadata?: {
+    [key: string]: any;
+  };
 }

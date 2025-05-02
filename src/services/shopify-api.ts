@@ -15,6 +15,107 @@ export class ShopifyAPI {
   }
 
   /**
+   * Generator function to yield product IDs in batches as they are fetched
+   * This allows for streaming product IDs without waiting for all to be fetched
+   * @param filters - Product filters
+   * @param batchSize - Number of products to fetch per API call
+   */
+  async *getProductIdsGenerator(
+    filters: ProductFilters = {},
+    batchSize: number = 250
+  ): AsyncGenerator<string[], void, unknown> {
+    try {
+      logger.info("Fetching product IDs using generator pattern", { filters });
+
+      let hasNextPage = true;
+      let cursor: string | null = null;
+
+      // Construct the GraphQL query with #graphql tag
+      const query = `#graphql
+      query GetProductIds($first: Int!, $after: String, $query: String) {
+        products(first: $first, after: $after, query: $query) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          edges {
+            node {
+              id
+              updatedAt
+            }
+          }
+        }
+      }
+    `;
+
+      // Build query string for filtering
+      const queryParts = [];
+      if (filters.productType) {
+        queryParts.push(`product_type:${filters.productType}`);
+      }
+      if (filters.vendor) {
+        queryParts.push(`vendor:${filters.vendor}`);
+      }
+      if (filters.createdAtMin) {
+        queryParts.push(`created_at:>=${filters.createdAtMin}`);
+      }
+      if (filters.createdAtMax) {
+        queryParts.push(`created_at:<=${filters.createdAtMax}`);
+      }
+      if (filters.updatedAtMin) {
+        queryParts.push(`updated_at:>=${filters.updatedAtMin}`);
+      }
+      if (filters.updatedAtMax) {
+        queryParts.push(`updated_at:<=${filters.updatedAtMax}`);
+      }
+
+      // Loop until we've fetched all products, yielding each batch as it's retrieved
+      while (hasNextPage) {
+        // Prepare variables for the GraphQL request
+        const variables: {
+          first: number;
+          after: string | null;
+          query: string | null;
+        } = {
+          first: batchSize,
+          after: cursor,
+          query: queryParts.length > 0 ? queryParts.join(" AND ") : null,
+        };
+
+        logger.debug("Fetching product IDs with variables:", variables);
+        // Make the request with the query and variables
+        const { data } = await this.client.request(query, {
+          variables,
+        });
+
+        // Extract product IDs from the response
+        const productIds = data.products.edges.map((edge: any) => {
+          // GraphQL IDs are in the format "gid://shopify/Product/1234567890"
+          // We extract just the numeric part
+          const id = edge.node.id.split("/").pop();
+          return id;
+        });
+
+        // Yield this batch of product IDs
+        yield productIds;
+
+        // Update pagination info for next iteration
+        hasNextPage = data.products.pageInfo.hasNextPage;
+        cursor = data.products.pageInfo.endCursor;
+
+        logger.info(
+          `Retrieved ${productIds.length} product IDs (cursor: ${cursor})`
+        );
+      }
+
+      logger.info(`Completed product ID retrieval using generator pattern`);
+    } catch (error) {
+      logger.error("Error fetching products from Shopify:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Gets product IDs from Shopify with the option to fetch all or a limited number
    * @param filters - Product filters
    * @param options - Pagination options, including fetch all option
@@ -45,6 +146,8 @@ export class ShopifyAPI {
             pageInfo {
               hasNextPage
               endCursor
+              hasPreviousPage
+              startCursor
             }
             edges {
               node {
@@ -286,8 +389,6 @@ export class ShopifyAPI {
         created_at: product.createdAt,
         updated_at: product.updatedAt,
       };
-
-      logger.debug(`Retrieved product ${productId} from Shopify`);
 
       return transformedProduct;
     } catch (error) {
