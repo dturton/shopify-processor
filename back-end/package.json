@@ -1,5 +1,5 @@
 {
-  "name": "shopify-processor",
+  "name": "shopify-processor-back-end",
   "version": "1.0.0",
   "description": "A TypeScript application for processing Shopify products with BullMQ queue system",
   "main": "dist/app.js",

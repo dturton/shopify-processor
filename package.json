@@ -1,0 +1,20 @@
+{
+  "name": "shopify-processor",
+  "version": "1.0.0",
+  "description": "This guide explains how to test the product synchronization queue system and interpret the results.",
+  "homepage": "https://github.com/dturton/shopify-processor#readme",
+  "bugs": {
+    "url": "https://github.com/dturton/shopify-processor/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dturton/shopify-processor.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
