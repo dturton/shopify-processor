@@ -82,7 +82,6 @@ export class ShopifyAPI {
           query: queryParts.length > 0 ? queryParts.join(" AND ") : null,
         };
 
-        logger.debug("Fetching product IDs with variables:", variables);
         // Make the request with the query and variables
         const { data } = await this.client.request(query, {
           variables,

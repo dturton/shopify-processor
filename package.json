@@ -21,6 +21,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@bull-board/express": "^6.9.2",
     "@shopify/admin-api-client": "^1.0.8",
     "bullmq": "^4.1.0",
     "cors": "^2.8.5",

@@ -1,12 +1,12 @@
 // src/connectors/sources/shopify.ts
 import { SyncContext } from "../../types";
 import { ShopifyAPI } from "../../services/shopify-api";
-import { ProductModel, IProduct } from "../../models/product";
+import { ProductModel, IProduct, ISyncMetadata } from "../../models/product";
 import logger from "../../utils/logger";
 
 /**
- * Shopify connector with streaming pattern using async generator
- * Processes and saves products immediately as product IDs are fetched
+ * Shopify connector with streaming pattern and sync metadata
+ * Processes and saves products immediately with detailed tracking metadata
  */
 export default async function fetchData(
   syncContext: SyncContext
@@ -15,6 +15,7 @@ export default async function fetchData(
     // Get configuration from sync context
     const config = syncContext.getConfig();
     const storeId = config.shopName || "default-store";
+    const syncCursor = new Date().toISOString(); // Use timestamp as cursor for this sync run
 
     // Initialize the Shopify API with credentials from config
     const shopifyAPI = new ShopifyAPI({
@@ -24,7 +25,7 @@ export default async function fetchData(
 
     syncContext.log(
       "info",
-      `Processing Shopify products for shop: ${config.shopName}`
+      `Processing Shopify products for shop: ${config.shopName} with sync cursor: ${syncCursor}`
     );
 
     // Configure filters for the product fetch
@@ -79,6 +80,15 @@ export default async function fetchData(
     // Keep track of product IDs to fetch details for
     let productIdsToProcess: string[] = [];
 
+    // If this is a full sync, mark all existing products as needing verification
+    let needsVerification = !config.lastSyncTime;
+    if (needsVerification) {
+      syncContext.log(
+        "info",
+        "Full sync - will mark products for verification"
+      );
+    }
+
     // Process each batch of product IDs as they're yielded by the generator
     for await (const productIdBatch of productIdsGenerator) {
       // Log each batch of IDs received
@@ -119,10 +129,18 @@ export default async function fetchData(
           // Process each product immediately - write directly to database
           for (const shopifyProduct of products) {
             try {
+              // See if this product already exists in the database
+              const existingProduct = await ProductModel.findOne({
+                storeId,
+                productId: shopifyProduct.id,
+              });
+
               // Transform the Shopify product to our database model format
               const transformedProduct = transformProduct(
                 shopifyProduct,
-                storeId
+                storeId,
+                existingProduct as IProduct,
+                syncCursor
               );
 
               // Create an upsert operation that directly executes
@@ -213,23 +231,50 @@ export default async function fetchData(
     // Determine if this was a full sync
     const isFullSync = !config.lastSyncTime;
 
-    // For full syncs, cleanup deleted products
+    // For full syncs, mark products as deleted if they weren't in this sync
     if (isFullSync && processedProductIds.length > 0 && !config.skipCleanup) {
-      syncContext.log("info", `Cleaning up deleted products after full sync`);
+      syncContext.log("info", `Marking deleted products after full sync`);
 
       try {
-        // Find and delete products that weren't in this sync
-        const result = await ProductModel.deleteMany({
-          storeId,
-          productId: { $nin: processedProductIds },
-        });
+        // Mark products that weren't in this sync as deleted
+        const result = await ProductModel.updateMany(
+          {
+            storeId,
+            productId: { $nin: processedProductIds },
+            "_sync_metadata.deleted_at": null, // Only update products that aren't already marked as deleted
+          },
+          {
+            $set: {
+              "_sync_metadata.deleted_at": new Date(),
+              "_sync_metadata.last_action": "DELETED",
+              "_sync_metadata.last_modified_at": new Date(),
+              "_sync_metadata.cursor": syncCursor,
+            },
+          }
+        );
 
         syncContext.log(
           "info",
-          `Cleaned up ${result.deletedCount} deleted products`
+          `Marked ${result.modifiedCount} products as deleted`
         );
+
+        // Optionally, physically delete products that have been marked as deleted for a certain period
+        if (config.purgeDeletedAfterDays) {
+          const purgeDate = new Date();
+          purgeDate.setDate(purgeDate.getDate() - config.purgeDeletedAfterDays);
+
+          const purgeResult = await ProductModel.deleteMany({
+            storeId,
+            "_sync_metadata.deleted_at": { $ne: null, $lte: purgeDate },
+          });
+
+          syncContext.log(
+            "info",
+            `Purged ${purgeResult.deletedCount} products that were marked as deleted more than ${config.purgeDeletedAfterDays} days ago`
+          );
+        }
       } catch (error) {
-        syncContext.log("error", "Error cleaning up deleted products:", error);
+        syncContext.log("error", "Error handling deleted products:", error);
       }
     }
 
@@ -254,6 +299,7 @@ export default async function fetchData(
       duration,
       rate,
     });
+    syncContext.setMetadata("syncCursor", syncCursor);
   } catch (error) {
     syncContext.log("error", "Error in Shopify sync:", error);
     throw error;
@@ -262,10 +308,13 @@ export default async function fetchData(
 
 /**
  * Transform a Shopify product to our database model format
+ * Includes sync metadata tracking
  */
 function transformProduct(
   shopifyProduct: any,
-  storeId: string
+  storeId: string,
+  existingProduct: IProduct | null = null,
+  cursor: string | null = null
 ): Partial<IProduct> {
   // Transform variants
   const variants = shopifyProduct.variants.map((variant: any) => ({
@@ -276,6 +325,27 @@ function transformProduct(
     inventoryQuantity: variant.inventory_quantity,
     inventoryItemId: variant.inventory_item_id,
   }));
+
+  const now = new Date();
+
+  // Prepare the sync metadata
+  const syncMetadata: ISyncMetadata = existingProduct
+    ? {
+        // For existing products, preserve first_seen_at and update other fields
+        deleted_at: null,
+        last_action: "UPDATED",
+        first_seen_at: existingProduct._sync_metadata.first_seen_at,
+        cursor: cursor || existingProduct._sync_metadata.cursor,
+        last_modified_at: now,
+      }
+    : {
+        // For new products, set all fields
+        deleted_at: null,
+        last_action: "ADDED",
+        first_seen_at: now,
+        cursor: cursor,
+        last_modified_at: now,
+      };
 
   // Return transformed product
   return {
@@ -290,5 +360,6 @@ function transformProduct(
     variants,
     shopifyCreatedAt: new Date(shopifyProduct.created_at),
     shopifyUpdatedAt: new Date(shopifyProduct.updated_at),
+    _sync_metadata: syncMetadata,
   };
 }

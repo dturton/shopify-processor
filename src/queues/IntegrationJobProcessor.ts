@@ -45,16 +45,13 @@ export class IntegrationJobProcessor {
       progress: 0,
       lastSyncTime: null, // Initial sync has no lastSyncTime
     });
-    await state.save();
+    const savedState = await state.save();
 
     // Then add to BullMQ queue
     const job = await integrationQueue.add(
       "process-integration",
-      { jobId },
-      {
-        jobId,
-        ...options,
-      }
+      { ...savedState.toObject() },
+      { ...options }
     );
 
     logger.info(`Job ${jobId} created and added to queue`);
@@ -300,3 +297,4 @@ export class IntegrationJobProcessor {
 }
 
 export default IntegrationJobProcessor;
+export { integrationQueue };

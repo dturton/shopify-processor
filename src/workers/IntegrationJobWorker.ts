@@ -167,7 +167,7 @@ export class IntegrationJobWorker {
     return {
       // Default options
       batchSize: 250,
-      detailBatchSize: 10,
+      detailBatchSize: 100,
       storeBatchSize: 50,
 
       // Job-specific options
