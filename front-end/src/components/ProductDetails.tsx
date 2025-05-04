@@ -1,216 +1,88 @@
-import React from "react";
-import { Product } from "@/lib/types";
-import { formatStoreLocalDate, getRelativeTimeString } from "@/lib/dateUtils";
-import DateDisplay from "./DateDisplay";
+import React, { useEffect } from "react";
+import { useRouter } from "next/router";
+import Link from "next/link";
+import useSWR from "swr";
+import Layout from "@/components/Layout";
+import ProductDetail from "@/components/ProductDetail";
+import { ProductResponse } from "@/lib/types";
 
-interface ProductDetailProps {
-  product: Product;
-}
+const ProductPage = () => {
+  const router = useRouter();
 
-const ProductDetail: React.FC<ProductDetailProps> = ({ product }) => {
-  // Format currency
-  const formatPrice = (price: string) => {
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-    }).format(parseFloat(price));
-  };
+  // Use useEffect to handle the loading state properly
+  useEffect(() => {
+    // Router might not be ready yet
+    if (!router.isReady) return;
 
-  // Format date - using the store's timezone (EST)
-  const formatDate = (date: Date) => {
-    return formatStoreLocalDate(date);
-  };
+    // If the router is ready but has no query params, go to products page
+    if (router.isReady && !router.query.productId) {
+      console.log("No product ID found, redirecting to products page");
+      router.push("/");
+    }
+  }, [router.isReady, router.query]);
 
-  // Get relative time (e.g. "2 hours ago")
-  const getRelativeTime = (date: Date) => {
-    return getRelativeTimeString(date);
-  };
+  // Only proceed when router is ready and we have a productId
+  const { productId } = router.query;
+
+  // Fetch product with SWR - only when router is ready and productId exists
+  const { data, error, isLoading } = useSWR<ProductResponse>(
+    router.isReady && productId ? `/api/products/${productId}` : null
+  );
+
+  // Determine if the product was not found (404 from API)
+  const isNotFound = error?.status === 404 || (data && !data.success);
 
   return (
-    <div className="bg-white rounded-lg shadow-md overflow-hidden">
-      <div className="p-6">
-        <div className="flex justify-between items-start">
-          <h1 className="text-2xl font-bold text-gray-900 mb-4">
-            {product.title}
-          </h1>
-          <div className="bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm">
-            {product._sync_metadata.last_action}
-          </div>
-        </div>
-
-        {product.description && (
-          <div className="mt-4">
-            <h2 className="text-lg font-semibold text-gray-800 mb-2">
-              Description
-            </h2>
-            <p className="text-gray-600">{product.description}</p>
-          </div>
-        )}
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
-          <div>
-            <h2 className="text-lg font-semibold text-gray-800 mb-3">
-              Product Information
-            </h2>
-            <table className="w-full">
-              <tbody>
-                <tr className="border-b">
-                  <td className="py-2 text-gray-600">Product ID</td>
-                  <td className="py-2 text-gray-900">{product.productId}</td>
-                </tr>
-                <tr className="border-b">
-                  <td className="py-2 text-gray-600">Handle</td>
-                  <td className="py-2 text-gray-900">{product.handle}</td>
-                </tr>
-                {product.vendor && (
-                  <tr className="border-b">
-                    <td className="py-2 text-gray-600">Vendor</td>
-                    <td className="py-2 text-gray-900">{product.vendor}</td>
-                  </tr>
-                )}
-                {product.productType && (
-                  <tr className="border-b">
-                    <td className="py-2 text-gray-600">Product Type</td>
-                    <td className="py-2 text-gray-900">
-                      {product.productType}
-                    </td>
-                  </tr>
-                )}
-                <tr className="border-b">
-                  <td className="py-2 text-gray-600">Created</td>
-                  <td className="py-2 text-gray-900">
-                    <DateDisplay date={product.shopifyCreatedAt} />
-                  </td>
-                </tr>
-                <tr className="border-b">
-                  <td className="py-2 text-gray-600">Updated</td>
-                  <td className="py-2 text-gray-900">
-                    <DateDisplay date={product.shopifyUpdatedAt} />
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div>
-            <h2 className="text-lg font-semibold text-gray-800 mb-3">
-              Sync Information
-            </h2>
-            <table className="w-full">
-              <tbody>
-                <tr className="border-b">
-                  <td className="py-2 text-gray-600">Last Action</td>
-                  <td className="py-2 text-gray-900">
-                    {product._sync_metadata.last_action}
-                  </td>
-                </tr>
-                <tr className="border-b">
-                  <td className="py-2 text-gray-600">First Seen</td>
-                  <td className="py-2 text-gray-900">
-                    <DateDisplay date={product._sync_metadata.first_seen_at} />
-                  </td>
-                </tr>
-                <tr className="border-b">
-                  <td className="py-2 text-gray-600">Last Modified</td>
-                  <td className="py-2 text-gray-900">
-                    <DateDisplay
-                      date={product._sync_metadata.last_modified_at}
-                    />
-                  </td>
-                </tr>
-                {product._sync_metadata.deleted_at && (
-                  <tr className="border-b">
-                    <td className="py-2 text-gray-600">Deleted At</td>
-                    <td className="py-2 text-gray-900">
-                      <DateDisplay date={product._sync_metadata.deleted_at} />
-                    </td>
-                  </tr>
-                )}
-                {product._sync_metadata.cursor && (
-                  <tr className="border-b">
-                    <td className="py-2 text-gray-600">Sync Cursor</td>
-                    <td className="py-2 text-gray-900">
-                      {product._sync_metadata.cursor}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {product.tags && product.tags.length > 0 && (
-          <div className="mt-6">
-            <h2 className="text-lg font-semibold text-gray-800 mb-3">Tags</h2>
-            <div className="flex flex-wrap gap-2">
-              {product.tags.map((tag, index) => (
-                <span
-                  key={index}
-                  className="px-3 py-1 bg-gray-100 text-gray-700 rounded-full text-sm"
-                >
-                  {tag}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div className="mt-6">
-          <h2 className="text-lg font-semibold text-gray-800 mb-3">
-            Variants ({product.variants.length})
-          </h2>
-          <div className="overflow-x-auto">
-            <table className="min-w-full border-collapse">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Variant ID
-                  </th>
-                  <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    SKU
-                  </th>
-                  <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Price
-                  </th>
-                  <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Compare At
-                  </th>
-                  <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                    Inventory
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {product.variants.map((variant) => (
-                  <tr key={variant.variantId}>
-                    <td className="py-3 px-4 text-sm text-gray-900">
-                      {variant.variantId}
-                    </td>
-                    <td className="py-3 px-4 text-sm text-gray-900">
-                      {variant.sku}
-                    </td>
-                    <td className="py-3 px-4 text-sm text-gray-900">
-                      {formatPrice(variant.price)}
-                    </td>
-                    <td className="py-3 px-4 text-sm text-gray-900">
-                      {variant.compareAtPrice
-                        ? formatPrice(variant.compareAtPrice)
-                        : "-"}
-                    </td>
-                    <td className="py-3 px-4 text-sm text-gray-900">
-                      {variant.inventoryQuantity !== undefined
-                        ? variant.inventoryQuantity
-                        : "-"}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+    <Layout
+      title={
+        data?.data?.title
+          ? `${data.data.title} | Shopify Product Processor`
+          : "Product Details"
+      }
+    >
+      <div className="mb-6">
+        <Link href="/" className="text-blue-600 hover:text-blue-800">
+          &larr; Back to Products
+        </Link>
       </div>
-    </div>
+
+      {isLoading && (
+        <div className="py-10 text-center">
+          <div className="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mr-2"></div>
+          <span className="text-gray-600">Loading product details...</span>
+        </div>
+      )}
+
+      {isNotFound && (
+        <div className="bg-yellow-100 text-yellow-700 p-4 rounded-md mb-6">
+          <h2 className="text-xl font-semibold mb-2">Product Not Found</h2>
+          <p>We couldn't find a product with ID: {productId}</p>
+          <p className="mt-4">
+            The product may have been deleted or the ID is incorrect.
+          </p>
+          <p className="mt-4">
+            <Link href="/" className="text-blue-600 hover:underline">
+              View all products
+            </Link>
+          </p>
+        </div>
+      )}
+
+      {error && !isNotFound && (
+        <div className="bg-red-100 text-red-700 p-4 rounded-md mb-6">
+          <h2 className="text-xl font-semibold mb-2">Error Loading Product</h2>
+          <p>There was a problem retrieving the product information.</p>
+          <p className="text-sm mt-2">
+            Error details: {error.message || "Unknown error"}
+          </p>
+        </div>
+      )}
+
+      {data && data.success && data.data && (
+        <ProductDetail product={data.data} />
+      )}
+    </Layout>
   );
 };
 
-export default ProductDetail;
+export default ProductPage;
