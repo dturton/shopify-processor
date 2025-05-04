@@ -1,6 +1,8 @@
 import React from "react";
 import Link from "next/link";
 import { Product } from "@/lib/types";
+import { formatShortDate, getRelativeTimeString } from "@/lib/dateUtils";
+import DateDisplay from "./DateDisplay";
 
 interface ProductCardProps {
   product: Product;
@@ -27,13 +29,14 @@ const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
       ? formatPrice(product.variants[0].compareAtPrice)
       : null;
 
-  // Format date
+  // Format date in store's timezone (EST)
   const formatDate = (date: Date) => {
-    return new Date(date).toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
+    return formatShortDate(date);
+  };
+
+  // Get relative time (e.g. "2 hours ago")
+  const getRelativeTime = (date: Date) => {
+    return getRelativeTimeString(date);
   };
 
   return (
@@ -73,7 +76,15 @@ const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
         )}
 
         <div className="mt-3 flex justify-between text-xs text-gray-500">
-          <div>Updated: {formatDate(product.updatedAt)}</div>
+          <div>
+            Updated:{" "}
+            <DateDisplay
+              date={product.updatedAt}
+              className="text-xs inline"
+              showSeconds={false}
+              showTimezone={false}
+            />
+          </div>
           <div>{product.variants.length} variant(s)</div>
         </div>
 

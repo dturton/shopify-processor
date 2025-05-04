@@ -1,6 +1,7 @@
 import React, { ReactNode } from "react";
 import Head from "next/head";
 import Navbar from "./Navbar";
+import TimezoneDisplay from "./TimezoneDisplay";
 
 interface LayoutProps {
   children: ReactNode;
@@ -30,6 +31,7 @@ const Layout: React.FC<LayoutProps> = ({
       <footer className="py-6 bg-gray-100">
         <div className="container mx-auto text-center text-gray-600">
           <p>© {new Date().getFullYear()} Shopify Product Processor</p>
+          <TimezoneDisplay className="mt-2" />
         </div>
       </footer>
     </div>

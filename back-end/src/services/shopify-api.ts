@@ -11,7 +11,29 @@ export class ShopifyAPI {
       storeDomain: credentials.shopName,
       accessToken: credentials.accessToken,
       apiVersion: "2025-01", // Update this according to the latest Shopify API version
+      logger: (log) => {
+        logger.debug(JSON.stringify(log, null, 2));
+      },
     });
+  }
+
+  async getProductsCount(date: string): Promise<number> {
+    const query = `#graphql
+    query GetProductsCount($query: String) {
+      productsCount(query: $query) {
+        count
+      }
+    }
+  `;
+
+    // Format the query string properly - note no quotes and no spaces around operators
+    const queryString = `updated_at:>='${date}'`;
+
+    const response = await this.client.request(query, {
+      variables: { query: queryString },
+    });
+
+    return response.data.productsCount.count;
   }
 
   /**
@@ -63,32 +85,35 @@ export class ShopifyAPI {
         queryParts.push(`created_at:<=${filters.createdAtMax}`);
       }
       if (filters.updatedAtMin) {
-        queryParts.push(`updated_at:>=${filters.updatedAtMin}`);
+        queryParts.push(`updated_at:>='${filters.updatedAtMin}'`);
       }
       if (filters.updatedAtMax) {
-        queryParts.push(`updated_at:<=${filters.updatedAtMax}`);
+        queryParts.push(`updated_at:<='${filters.updatedAtMax}'`);
       }
 
+      const variables: {
+        first: number;
+        after: string | null;
+        query: string | null;
+      } = {
+        first: batchSize,
+        after: cursor,
+        query: queryParts.length > 0 ? queryParts.join(" AND ") : null,
+      };
+
+      // Prepare variables for the GraphQL request
+
+      const productCount = await this.getProductsCount(variables);
+      console.log("Product count: ", productCount);
       // Loop until we've fetched all products, yielding each batch as it's retrieved
       while (hasNextPage) {
-        // Prepare variables for the GraphQL request
-        const variables: {
-          first: number;
-          after: string | null;
-          query: string | null;
-        } = {
-          first: batchSize,
-          after: cursor,
-          query: queryParts.length > 0 ? queryParts.join(" AND ") : null,
-        };
-
         // Make the request with the query and variables
-        const { data } = await this.client.request(query, {
+        const response = await this.client.request(query, {
           variables,
         });
 
         // Extract product IDs from the response
-        const productIds = data.products.edges.map((edge: any) => {
+        const productIds = response.data.products.edges.map((edge: any) => {
           // GraphQL IDs are in the format "gid://shopify/Product/1234567890"
           // We extract just the numeric part
           const id = edge.node.id.split("/").pop();
@@ -99,8 +124,8 @@ export class ShopifyAPI {
         yield productIds;
 
         // Update pagination info for next iteration
-        hasNextPage = data.products.pageInfo.hasNextPage;
-        cursor = data.products.pageInfo.endCursor;
+        hasNextPage = response.data.products.pageInfo.hasNextPage;
+        cursor = response.data.products.pageInfo.endCursor;
 
         logger.info(
           `Retrieved ${productIds.length} product IDs (cursor: ${cursor})`
@@ -108,185 +133,6 @@ export class ShopifyAPI {
       }
 
       logger.info(`Completed product ID retrieval using generator pattern`);
-    } catch (error) {
-      logger.error("Error fetching products from Shopify:", error);
-      throw error;
-    }
-  }
-
-  /**
-   * Gets product IDs from Shopify with the option to fetch all or a limited number
-   * @param filters - Product filters
-   * @param options - Pagination options, including fetch all option
-   * @returns Promise with product IDs
-   */
-  async getProductIds(
-    filters: ProductFilters = {},
-    options: {
-      limit?: number | "all";
-      cursor?: string | null;
-      batchSize?: number;
-    } = {}
-  ): Promise<string[]> {
-    try {
-      // If limit is 'all', use pagination to get all products
-      if (options.limit === "all") {
-        logger.info("Fetching all product IDs from Shopify", { filters });
-
-        const allProductIds: string[] = [];
-        let hasNextPage = true;
-        let cursor: string | null = null;
-        const batchSize = options.batchSize || 250; // Default to maximum allowed by Shopify
-
-        // Construct the GraphQL query with #graphql tag for code generation
-        const query = `#graphql
-        query GetProductIds($first: Int!, $after: String, $query: String) {
-          products(first: $first, after: $after, query: $query) {
-            pageInfo {
-              hasNextPage
-              endCursor
-              hasPreviousPage
-              startCursor
-            }
-            edges {
-              node {
-                id
-              }
-            }
-          }
-        }
-      `;
-
-        // Build query string for filtering
-        const queryParts = [];
-        if (filters.productType) {
-          queryParts.push(`product_type:${filters.productType}`);
-        }
-        if (filters.vendor) {
-          queryParts.push(`vendor:${filters.vendor}`);
-        }
-        if (filters.createdAtMin) {
-          queryParts.push(`created_at:>=${filters.createdAtMin}`);
-        }
-        if (filters.createdAtMax) {
-          queryParts.push(`created_at:<=${filters.createdAtMax}`);
-        }
-        if (filters.updatedAtMin) {
-          queryParts.push(`updated_at:>=${filters.updatedAtMin}`);
-        }
-        if (filters.updatedAtMax) {
-          queryParts.push(`updated_at:<=${filters.updatedAtMax}`);
-        }
-
-        // Loop until we've fetched all products
-        while (hasNextPage) {
-          // Prepare variables for the GraphQL request
-          const variables: {
-            first: number;
-            after: string | null;
-            query: string | null;
-          } = {
-            first: batchSize,
-            after: cursor,
-            query: queryParts.length > 0 ? queryParts.join(" AND ") : null,
-          };
-
-          // Make the request with the query and variables
-          const { data } = await this.client.request(query, {
-            variables,
-          });
-
-          // Extract product IDs from the response
-          const pageProductIds = data.products.edges.map((edge: any) => {
-            // GraphQL IDs are in the format "gid://shopify/Product/1234567890"
-            // We extract just the numeric part
-            const id = edge.node.id.split("/").pop();
-            return id;
-          });
-
-          // Add this page's IDs to our complete list
-          allProductIds.push(...pageProductIds);
-
-          // Update pagination info for next iteration
-          hasNextPage = data.products.pageInfo.hasNextPage;
-          cursor = data.products.pageInfo.endCursor;
-
-          logger.info(
-            `Retrieved ${pageProductIds.length} products (total so far: ${allProductIds.length})`
-          );
-        }
-
-        logger.info(
-          `Completed product retrieval. Total products: ${allProductIds.length}`
-        );
-        return allProductIds;
-      }
-      // If limit is a number, just get that many products
-      else {
-        const limit = options.limit || 50;
-        const cursor = options.cursor || null;
-
-        // Construct the GraphQL query with #graphql tag for code generation
-        const query = `#graphql
-        query GetProductIds($first: Int!, $after: String, $query: String) {
-          products(first: $first, after: $after, query: $query) {
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-            edges {
-              node {
-                id
-              }
-            }
-          }
-        }
-      `;
-
-        // Build query string for filtering
-        const queryParts = [];
-        if (filters.productType) {
-          queryParts.push(`product_type:${filters.productType}`);
-        }
-        if (filters.vendor) {
-          queryParts.push(`vendor:${filters.vendor}`);
-        }
-        if (filters.createdAtMin) {
-          queryParts.push(`created_at:>=${filters.createdAtMin}`);
-        }
-        if (filters.createdAtMax) {
-          queryParts.push(`created_at:<=${filters.createdAtMax}`);
-        }
-        if (filters.updatedAtMin) {
-          queryParts.push(`updated_at:>=${filters.updatedAtMin}`);
-        }
-        if (filters.updatedAtMax) {
-          queryParts.push(`updated_at:<=${filters.updatedAtMax}`);
-        }
-
-        // Prepare variables for the GraphQL request
-        const variables = {
-          first: Math.min(limit, 250), // Ensure we don't exceed Shopify's maximum
-          after: cursor,
-          query: queryParts.length > 0 ? queryParts.join(" AND ") : null,
-        };
-
-        // Make the request with the query and variables
-        const { data } = await this.client.request(query, {
-          variables,
-        });
-
-        // Extract product IDs from the response
-        const productIds = data.products.edges.map((edge: any) => {
-          // GraphQL IDs are in the format "gid://shopify/Product/1234567890"
-          // We extract just the numeric part
-          const id = edge.node.id.split("/").pop();
-          return id;
-        });
-
-        logger.info(`Retrieved ${productIds.length} products from Shopify`);
-        return productIds;
-      }
     } catch (error) {
       logger.error("Error fetching products from Shopify:", error);
       throw error;

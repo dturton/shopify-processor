@@ -1,5 +1,7 @@
 import React from "react";
 import { Product } from "@/lib/types";
+import { formatStoreLocalDate, getRelativeTimeString } from "@/lib/dateUtils";
+import DateDisplay from "./DateDisplay";
 
 interface ProductDetailProps {
   product: Product;
@@ -14,15 +16,14 @@ const ProductDetail: React.FC<ProductDetailProps> = ({ product }) => {
     }).format(parseFloat(price));
   };
 
-  // Format date
+  // Format date - using the store's timezone (EST)
   const formatDate = (date: Date) => {
-    return new Date(date).toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    return formatStoreLocalDate(date);
+  };
+
+  // Get relative time (e.g. "2 hours ago")
+  const getRelativeTime = (date: Date) => {
+    return getRelativeTimeString(date);
   };
 
   return (
@@ -78,13 +79,13 @@ const ProductDetail: React.FC<ProductDetailProps> = ({ product }) => {
                 <tr className="border-b">
                   <td className="py-2 text-gray-600">Created</td>
                   <td className="py-2 text-gray-900">
-                    {formatDate(product.shopifyCreatedAt)}
+                    <DateDisplay date={product.shopifyCreatedAt} />
                   </td>
                 </tr>
                 <tr className="border-b">
                   <td className="py-2 text-gray-600">Updated</td>
                   <td className="py-2 text-gray-900">
-                    {formatDate(product.shopifyUpdatedAt)}
+                    <DateDisplay date={product.shopifyUpdatedAt} />
                   </td>
                 </tr>
               </tbody>
@@ -106,20 +107,22 @@ const ProductDetail: React.FC<ProductDetailProps> = ({ product }) => {
                 <tr className="border-b">
                   <td className="py-2 text-gray-600">First Seen</td>
                   <td className="py-2 text-gray-900">
-                    {formatDate(product._sync_metadata.first_seen_at)}
+                    <DateDisplay date={product._sync_metadata.first_seen_at} />
                   </td>
                 </tr>
                 <tr className="border-b">
                   <td className="py-2 text-gray-600">Last Modified</td>
                   <td className="py-2 text-gray-900">
-                    {formatDate(product._sync_metadata.last_modified_at)}
+                    <DateDisplay
+                      date={product._sync_metadata.last_modified_at}
+                    />
                   </td>
                 </tr>
                 {product._sync_metadata.deleted_at && (
                   <tr className="border-b">
                     <td className="py-2 text-gray-600">Deleted At</td>
                     <td className="py-2 text-gray-900">
-                      {formatDate(product._sync_metadata.deleted_at)}
+                      <DateDisplay date={product._sync_metadata.deleted_at} />
                     </td>
                   </tr>
                 )}

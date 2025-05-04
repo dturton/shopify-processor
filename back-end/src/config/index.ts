@@ -26,6 +26,7 @@ const config = {
     apiSecret: process.env.SHOPIFY_API_SECRET || "",
     scopes: (process.env.SHOPIFY_SCOPES || "").split(","),
     hostName: process.env.SHOPIFY_HOST || "",
+    timezone: process.env.SHOPIFY_TIMEZONE || "America/New_York", // Default to Eastern Time
   },
   logging: {
     level: process.env.LOG_LEVEL || "info",

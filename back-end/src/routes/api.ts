@@ -4,7 +4,7 @@ import logger from "../utils/logger";
 import { IntegrationJobProcessor } from "../queues/IntegrationJobProcessor";
 import { JobState } from "../models/JobState";
 import { ProductModel } from "../models/product";
-
+import { ShopifyAPI } from "../services/shopify-api";
 const router = express.Router();
 
 // Middleware to validate Shopify credentials using headers
@@ -40,7 +40,7 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       // Create a full sync job
-      const job = await IntegrationJobProcessor.createJob(
+      const job = await IntegrationJobProcessor.createIncrementalJob(
         "shopify",
         "mongodb",
         {
@@ -65,50 +65,6 @@ router.post(
       });
     } catch (error) {
       logger.error("Error starting full product sync:", error);
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : "Unknown error",
-      });
-    }
-  }
-);
-
-// API endpoint to perform an incremental sync of products
-router.post(
-  "/sync-products/incremental",
-  validateShopifyCredentials,
-  async (req: Request, res: Response) => {
-    try {
-      // Create an incremental sync job
-      const { job, isIncremental, previousSyncTime } =
-        await IntegrationJobProcessor.createIncrementalJob(
-          "shopify",
-          "mongodb",
-          {
-            options: {
-              // Add any job-specific options here
-              shopName: (req as any).shopifyCredentials.shopName,
-              accessToken: (req as any).shopifyCredentials.accessToken,
-            },
-          }
-        );
-
-      // Start the worker
-      IntegrationJobProcessor.startWorker();
-
-      res.json({
-        success: true,
-        message: isIncremental
-          ? "Incremental product sync started"
-          : "No previous sync found, starting full sync",
-        data: {
-          jobId: job.id,
-          type: isIncremental ? "incremental" : "full",
-          previousSyncTime,
-        },
-      });
-    } catch (error) {
-      logger.error("Error starting incremental product sync:", error);
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
