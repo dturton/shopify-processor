@@ -374,4 +374,36 @@ router.post("/test-db-write", async (req: Request, res: Response) => {
   }
 });
 
+// Add to src/routes/api.ts
+router.get("/products/:productId", async (req: Request, res: Response) => {
+  try {
+    const { productId } = req.params;
+
+    // Find the product in database
+    const product = await ProductModel.findOne({ productId });
+
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        error: `Product with ID ${productId} not found`,
+      });
+    }
+
+    // Enable CORS for frontend
+    res.header("Access-Control-Allow-Origin", "*");
+
+    // Return the product data
+    res.json({
+      success: true,
+      data: product,
+    });
+  } catch (error) {
+    logger.error(`Error fetching product ${req.params.productId}:`, error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
 export default router;
