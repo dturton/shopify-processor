@@ -1,70 +1,87 @@
-import { ProductModel } from "@/lib/db";
-import { NextApiRequest, NextApiResponse } from "next";
-// In pages/api/products/[productId].ts
-// In pages/api/products/[productId].ts
-async function getProductById(req: NextApiRequest, res: NextApiResponse) {
+// pages/api/products/[productId].ts
+import type { NextApiRequest, NextApiResponse } from "next";
+import type { IProduct } from "@back-end/models/product";
+import { ProductModel } from "@back-end/models/product";
+import mongoose from "mongoose";
+import logger from "@back-end/utils/logger";
+
+// Define the response type
+type ProductResponse = {
+  success: boolean;
+  data?: any;
+  error?: string;
+};
+
+// Connect to MongoDB (if not already connected)
+const connectDB = async () => {
+  if (mongoose.connection.readyState >= 1) return;
+
   try {
+    await mongoose.connect(
+      process.env.MONGODB_URI || "mongodb://localhost:27017/shopify-processor"
+    );
+    logger.info("MongoDB connected from API route");
+  } catch (error) {
+    logger.error("MongoDB connection error:", error);
+    throw new Error("Failed to connect to database");
+  }
+};
+
+export default async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ProductResponse>
+) {
+  // Only allow GET requests
+  if (req.method !== "GET") {
+    return res
+      .status(405)
+      .json({ success: false, error: "Method not allowed" });
+  }
+
+  try {
+    // Connect to the database
+    await connectDB();
+
+    // Get the product ID from the URL
     const { productId } = req.query;
 
     if (!productId || Array.isArray(productId)) {
       return res.status(400).json({
         success: false,
-        error: "Invalid product ID parameter",
+        error: "Invalid product ID",
       });
     }
 
-    console.log(`API: Looking up product with ID: ${productId}`);
+    logger.info(`API: Fetching product details for ID: ${productId}`);
 
-    // Try different ways of querying
-    const productByExactId = await ProductModel.findOne({ productId });
-    const productByStringId = await ProductModel.findOne({
-      productId: productId.toString(),
-    });
+    // Query the database for the product
+    const product = await ProductModel.findOne({ productId }).lean();
 
-    // If you're unsure about the field name, try a more general search
-    const productsWithSimilarId = await ProductModel.find({
-      $or: [
-        { productId: productId },
-        { productId: productId.toString() },
-        { "variants.variantId": productId },
-        { _id: productId.match(/^[0-9a-fA-F]{24}$/) ? productId : null },
-      ],
-    }).limit(5);
-
-    if (!productByExactId) {
-      console.log(`Product with exact ID ${productId} not found`);
-      console.log(`Found by string: ${productByStringId ? "Yes" : "No"}`);
-      console.log(`Similar matches: ${productsWithSimilarId.length}`);
-
-      if (productsWithSimilarId.length > 0) {
-        console.log(
-          "Similar matches:",
-          productsWithSimilarId.map((p) => ({
-            id: p.productId,
-            title: p.title,
-          }))
-        );
-      }
-
+    // If product not found, return 404
+    if (!product) {
+      logger.warn(`API: Product with ID ${productId} not found`);
       return res.status(404).json({
         success: false,
-        error: "Product not found",
-        requestedId: productId,
-        similarMatches: productsWithSimilarId.length,
+        error: `Product with ID ${productId} not found`,
       });
     }
 
-    // Return the product if found
+    logger.info(`API: Successfully retrieved product: ${product.title}`);
+
+    // Return the product data
     return res.status(200).json({
       success: true,
-      data: productByExactId,
+      data: product,
     });
   } catch (error) {
-    console.error("Error fetching product:", error);
+    // Log and return any errors
+    const errorMessage =
+      error instanceof Error ? error.message : "Unknown error";
+    logger.error(`API: Error fetching product:`, error);
+
     return res.status(500).json({
       success: false,
-      error: "Server error while fetching product",
-      message: error.message,
+      error: errorMessage,
     });
   }
 }

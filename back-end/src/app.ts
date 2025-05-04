@@ -41,7 +41,7 @@ app.use((req, res, next) => {
 
 // Apply API routes
 app.use("/api", apiRoutes);
-
+app.use("/", apiRoutes);
 // Health check endpoint
 app.get("/health", (req, res) => {
   res.status(200).json({
