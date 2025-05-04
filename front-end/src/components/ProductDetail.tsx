@@ -3,9 +3,8 @@ import { useRouter } from "next/router";
 import Link from "next/link";
 import useSWR from "swr";
 import Layout from "@/components/Layout";
-import ProductDetail from "@/components/ProductDetail";
 import { ProductResponse } from "@/lib/types";
-
+import ProductDetail from "./ProductDetail";
 const ProductPage = () => {
   const router = useRouter();
 
@@ -23,6 +22,7 @@ const ProductPage = () => {
 
   // Only proceed when router is ready and we have a productId
   const { productId } = router.query;
+  console.log("productId", productId);
 
   // Fetch product with SWR - only when router is ready and productId exists
   const { data, error, isLoading } = useSWR<ProductResponse>(
@@ -79,7 +79,25 @@ const ProductPage = () => {
       )}
 
       {data && data.success && data.data && (
-        <ProductDetail product={data.data} />
+        <div>
+          <h2 className="text-2xl font-bold mb-4">{data.data.title}</h2>
+          <div className="bg-white shadow rounded-lg p-6">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <p className="text-gray-600">ID: {data.data.id}</p>
+                <p className="text-gray-600">Status: {data.data.status}</p>
+              </div>
+              <div>
+                <p className="text-gray-600">
+                  Created: {new Date(data.data.created_at).toLocaleDateString()}
+                </p>
+                <p className="text-gray-600">
+                  Updated: {new Date(data.data.updated_at).toLocaleDateString()}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </Layout>
   );
