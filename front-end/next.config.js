@@ -1,13 +1,12 @@
+// next.config.js
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  swcMinify: true,
-  // Enable API routes to connect to our backend
-  rewrites: async () => {
+  async rewrites() {
     return [
       {
         source: "/api/:path*",
-        destination: "http://localhost:3000/api/:path*", // Proxy to backend
+        destination: "http://localhost:3010/api/:path*", // Proxy to backend
       },
     ];
   },

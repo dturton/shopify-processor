@@ -1,123 +1,148 @@
-import React, { useEffect, useState } from "react";
 import { useRouter } from "next/router";
-import Link from "next/link";
-import useSWR from "swr";
-import Layout from "@/components/Layout";
-import ProductDetail from "@/components/ProductDetail";
-import { ProductResponse } from "@/lib/types";
+import { useEffect, useState } from "react";
+import Head from "next/head";
 
-const ProductPage = () => {
+// Define Product type based on your model
+interface Product {
+  _id: string;
+  productId: string;
+  title: string;
+  description?: string;
+  handle: string;
+  productType?: string;
+  vendor?: string;
+  tags?: string[];
+  variants: Array<{
+    variantId: string;
+    price: string;
+    sku: string;
+    compareAtPrice?: string;
+    inventoryQuantity?: number;
+    inventoryItemId?: string;
+  }>;
+  // Add other fields as needed
+}
+
+export default function ProductPage() {
   const router = useRouter();
-  const [isNotFound, setIsNotFound] = useState(false);
-
-  // Only fetch when router is ready
   const { productId } = router.query;
-  const shouldFetch = router.isReady && productId;
 
-  // In your [productId].tsx file
-  const { data, error, isLoading } = useSWR<ProductResponse>(
-    shouldFetch ? `/api/products/${productId}` : null,
-    {
-      onError: (err) => {
-        console.error("Product fetch error:", {
-          message: err.message,
-          status: err.status,
-          info: err.info,
-          stack: err.stack,
-        });
-      },
-    }
-  );
+  const [product, setProduct] = useState<Product | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Update your error display to show more details
-  {
-    error && (
-      <div className="bg-red-100 text-red-700 p-4 rounded-md mb-6">
-        <h2 className="text-xl font-semibold mb-2">Error Loading Product</h2>
-        <p>There was a problem retrieving the product information.</p>
-        <p className="text-sm mt-2">
-          Error details: {error.message || "Unknown error"}
-        </p>
-        <p className="text-sm">Status: {error.status || "Unknown"}</p>
-        {error.info && (
-          <p className="text-sm">
-            Additional info: {JSON.stringify(error.info)}
-          </p>
-        )}
-      </div>
-    );
-  }
-
-  // For debugging - log the responses
   useEffect(() => {
-    if (shouldFetch) {
-      console.log(`Requesting product with ID: ${productId}`);
+    // Only fetch when productId is available (after hydration)
+    if (!productId) return;
+
+    async function fetchProduct() {
+      try {
+        setLoading(true);
+        const response = await fetch(`/api/products/${productId}`);
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || "Failed to fetch product");
+        }
+
+        const data = await response.json();
+        setProduct(data.data);
+      } catch (err) {
+        console.error("Error fetching product:", err);
+        setError(
+          err instanceof Error ? err.message : "Failed to fetch product"
+        );
+      } finally {
+        setLoading(false);
+      }
     }
-    if (data) {
-      console.log("API Response:", data);
-    }
-    if (error) {
-      console.error("API Error:", error);
-    }
-  }, [shouldFetch, productId, data, error]);
+
+    fetchProduct();
+  }, [productId]);
+
+  if (loading) return <div>Loading...</div>;
+  if (error) return <div>Error: {error}</div>;
+  if (!product) return <div>Product not found</div>;
 
   return (
-    <Layout
-      title={
-        data?.data?.title
-          ? `${data.data.title} | Shopify Product Processor`
-          : "Product Details"
-      }
-    >
-      <div className="mb-6">
-        <Link href="/" className="text-blue-600 hover:text-blue-800">
-          &larr; Back to Products
-        </Link>
-      </div>
-      {isLoading && (
-        <div className="py-10 text-center">
-          <div className="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500 mr-2"></div>
-          <span className="text-gray-600">Loading product details...</span>
-        </div>
-      )}
-      {(isNotFound || (data && !data.success)) && (
-        <div className="bg-yellow-100 text-yellow-700 p-4 rounded-md mb-6">
-          <h2 className="text-xl font-semibold mb-2">Product Not Found</h2>
-          <p>We couldn't find a product with ID: {productId}</p>
-          <p className="mt-4">
-            The product may have been deleted or the ID is incorrect.
-          </p>
-          <p className="mt-2 text-sm">
-            Try checking the browser console for more details.
-          </p>
-          <p className="mt-4">
-            <Link href="/" className="text-blue-600 hover:underline">
-              View all products
-            </Link>
-          </p>
-        </div>
-      )}
+    <div>
+      <Head>
+        <title>{product.title}</title>
+        <meta name="description" content={product.description || ""} />
+      </Head>
 
-      {error && (
-        <div className="bg-red-100 text-red-700 p-4 rounded-md mb-6">
-          <h2 className="text-xl font-semibold mb-2">Error Loading Product</h2>
-          <p>There was a problem retrieving the product information.</p>
-          <p className="text-sm mt-2">
-            Error details: {error.message || "Unknown error"}
-          </p>
-          <p className="text-sm">Status: {error.status || "Unknown"}</p>
-          {error.info && (
-            <p className="text-sm">
-              Additional info: {JSON.stringify(error.info)}
-            </p>
-          )}
+      <main className="container mx-auto px-4 py-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          {/* Product details */}
+          <div>
+            <h1 className="text-3xl font-bold mb-4">{product.title}</h1>
+            <p className="text-gray-600 mb-4">{product.productType}</p>
+            <p className="text-gray-600 mb-4">Vendor: {product.vendor}</p>
+
+            {product.description && (
+              <div className="mb-6">
+                <h2 className="text-xl font-semibold mb-2">Description</h2>
+                <div
+                  dangerouslySetInnerHTML={{ __html: product.description }}
+                ></div>
+              </div>
+            )}
+
+            {/* Variants */}
+            {product.variants.length > 0 && (
+              <div className="mb-6">
+                <h2 className="text-xl font-semibold mb-2">Variants</h2>
+                <div>
+                  {product.variants.map((variant) => (
+                    <div
+                      key={variant.variantId}
+                      className="border p-4 mb-2 rounded"
+                    >
+                      <p className="font-semibold">SKU: {variant.sku}</p>
+                      <p className="text-lg">Price: ${variant.price}</p>
+                      {variant.compareAtPrice && (
+                        <p className="text-gray-500 line-through">
+                          Compare at: ${variant.compareAtPrice}
+                        </p>
+                      )}
+                      <p>
+                        Inventory:{" "}
+                        {variant.inventoryQuantity !== undefined
+                          ? variant.inventoryQuantity
+                          : "Not tracked"}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Tags */}
+            {product.tags && product.tags.length > 0 && (
+              <div className="mb-6">
+                <h2 className="text-xl font-semibold mb-2">Tags</h2>
+                <div className="flex flex-wrap gap-2">
+                  {product.tags.map((tag, index) => (
+                    <span
+                      key={index}
+                      className="bg-gray-200 px-3 py-1 rounded-full text-sm"
+                    >
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* You could add product images here if you have them */}
+          <div>
+            <div className="bg-gray-200 w-full h-96 flex items-center justify-center">
+              <p className="text-gray-500">Product Image Placeholder</p>
+            </div>
+          </div>
         </div>
-      )}
-      {data && data.success && data.data && (
-        <ProductDetail product={data.data} />
-      )}
-    </Layout>
+      </main>
+    </div>
   );
-};
-
-export default ProductPage;
+}
