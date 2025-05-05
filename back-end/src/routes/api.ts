@@ -1,10 +1,10 @@
-// src/routes/api.ts
+// src/routes/integration-jobs.ts
 import express, { Request, Response, NextFunction } from "express";
+import { IntegrationJobService } from "../services/IntegrationJobService";
+import { IntegrationJob } from "../models/IntegrationJob";
+import { JobExecution } from "../models/JobExecution";
 import logger from "../utils/logger";
-import { IntegrationJobProcessor } from "../queues/IntegrationJobProcessor";
-import { JobState } from "../models/JobState";
-import { ProductModel } from "../models/product";
-import { ShopifyAPI } from "../services/shopify-api";
+
 const router = express.Router();
 
 // Middleware to validate Shopify credentials using headers
@@ -33,36 +33,44 @@ const validateShopifyCredentials = (
   next();
 };
 
-// API endpoint to perform a full sync of products
+// Create a new integration job
 router.post(
-  "/sync-products",
+  "/jobs",
   validateShopifyCredentials,
   async (req: Request, res: Response) => {
-    const syncType = req.body.syncType || "incremental";
-    const limit = req.body.limit || 250;
     try {
-      // Create a full sync job
-      const job = await IntegrationJobProcessor.createIncrementalJob(
-        "shopify",
-        "mongodb",
-        {
-          options: {
-            // Add any job-specific options here
+      const jobData = {
+        name: req.body.name,
+        description: req.body.description,
+        sourceType: req.body.sourceType || "shopify",
+        destinationType: req.body.destinationType || "mongodb",
+        configuration: {
+          // Include credentials from headers
+          shopName: (req as any).shopifyCredentials.shopName,
+          accessToken: (req as any).shopifyCredentials.accessToken,
+
+          // For compatibility with existing code that expects credentials in a nested object
+          shopify: {
             shopName: (req as any).shopifyCredentials.shopName,
             accessToken: (req as any).shopifyCredentials.accessToken,
           },
-        }
-      );
 
-      // Start the worker
-      IntegrationJobProcessor.startWorker();
+          // Include other configuration from request body
+          ...req.body.configuration,
+        },
+        enabled: req.body.enabled !== false,
+        schedule: req.body.schedule,
+        createdBy: req.body.createdBy,
+      };
 
-      res.json({
+      const job = await IntegrationJobService.createJob(jobData);
+
+      res.status(201).json({
         success: true,
-        job,
+        data: job,
       });
     } catch (error) {
-      logger.error("Error starting full product sync:", error);
+      logger.error("Error creating integration job:", error);
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
@@ -71,59 +79,131 @@ router.post(
   }
 );
 
-// API endpoint to resume a failed job
-router.post(
-  "/sync-products/resume/:jobId",
+// Get all integration jobs
+router.get("/jobs", async (req: Request, res: Response) => {
+  try {
+    // Extract query parameters for filtering
+    const sourceType = req.query.sourceType as string;
+    const destinationType = req.query.destinationType as string;
+    const enabled =
+      req.query.enabled !== undefined
+        ? req.query.enabled === "true"
+        : undefined;
+
+    // Build filter object
+    const filters: any = {};
+    if (sourceType) filters.sourceType = sourceType;
+    if (destinationType) filters.destinationType = destinationType;
+    if (enabled !== undefined) filters.enabled = enabled;
+
+    const jobs = await IntegrationJobService.listJobs(filters);
+
+    res.json({
+      success: true,
+      data: jobs,
+    });
+  } catch (error) {
+    logger.error("Error listing integration jobs:", error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+// Get a specific integration job
+router.get("/jobs/:jobId", async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const job = await IntegrationJobService.getJob(jobId);
+
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        error: `Integration job with ID ${jobId} not found`,
+      });
+    }
+
+    res.json({
+      success: true,
+      data: job,
+    });
+  } catch (error) {
+    logger.error(`Error getting integration job ${req.params.jobId}:`, error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+// Update an integration job
+router.put(
+  "/jobs/:jobId",
   validateShopifyCredentials,
   async (req: Request, res: Response) => {
     try {
       const { jobId } = req.params;
 
-      // Find the job in the database
-      const jobState = await JobState.findOne({ jobId });
+      // Prepare updates
+      const updates: any = {};
 
-      if (!jobState) {
-        return res.status(404).json({
-          success: false,
-          error: `Job with ID ${jobId} not found`,
-        });
-      }
+      // Update basic fields if provided
+      if (req.body.name) updates.name = req.body.name;
+      if (req.body.description !== undefined)
+        updates.description = req.body.description;
+      if (req.body.enabled !== undefined) updates.enabled = req.body.enabled;
+      if (req.body.schedule) updates.schedule = req.body.schedule;
 
-      if (jobState.status !== "FAILED") {
-        return res.status(400).json({
-          success: false,
-          error: `Can only resume failed jobs. Current status: ${jobState.status}`,
-        });
-      }
+      // Update configuration if provided
+      if (req.body.configuration) {
+        // Get existing job to merge configurations properly
+        const existingJob = await IntegrationJobService.getJob(jobId);
 
-      // Update job status back to CREATED to allow resuming
-      await JobState.findByIdAndUpdate(jobState._id, {
-        status: "CREATED",
-        // Don't reset progress - we'll resume from where we left off
-      });
+        if (!existingJob) {
+          return res.status(404).json({
+            success: false,
+            error: `Integration job with ID ${jobId} not found`,
+          });
+        }
 
-      // Add the job back to the queue
-      const job = await IntegrationJobProcessor.resumeJob(jobId, {
-        options: {
-          // Add any job-specific options here
+        // Create a new configuration by merging existing with updates
+        const existingConfig = existingJob.configuration.toObject();
+        updates.configuration = {
+          ...existingConfig,
+          ...req.body.configuration,
+          // Always keep the credentials from headers
           shopName: (req as any).shopifyCredentials.shopName,
           accessToken: (req as any).shopifyCredentials.accessToken,
-        },
-      });
 
-      // Start the worker
-      IntegrationJobProcessor.startWorker();
+          // Also maintain nested shopify credentials for compatibility
+          shopify: {
+            ...existingConfig.shopify,
+            shopName: (req as any).shopifyCredentials.shopName,
+            accessToken: (req as any).shopifyCredentials.accessToken,
+          },
+        };
+      }
+
+      // Update the job
+      const updatedJob = await IntegrationJobService.updateJob(jobId, updates);
+
+      if (!updatedJob) {
+        return res.status(404).json({
+          success: false,
+          error: `Integration job with ID ${jobId} not found`,
+        });
+      }
 
       res.json({
         success: true,
-        message: "Job resumed successfully",
-        data: {
-          jobId: job.id,
-          resumedFrom: jobState.progress,
-        },
+        data: updatedJob,
       });
     } catch (error) {
-      logger.error("Error resuming job:", error);
+      logger.error(
+        `Error updating integration job ${req.params.jobId}:`,
+        error
+      );
       res.status(500).json({
         success: false,
         error: error instanceof Error ? error.message : "Unknown error",
@@ -132,67 +212,106 @@ router.post(
   }
 );
 
-// API endpoint to get sync status information
-router.get("/sync-status", async (req: Request, res: Response) => {
+// Delete an integration job
+router.delete("/jobs/:jobId", async (req: Request, res: Response) => {
   try {
-    const syncInfo = await IntegrationJobProcessor.getLatestSyncInfo(
-      "shopify",
-      "mongodb"
+    const { jobId } = req.params;
+    const success = await IntegrationJobService.deleteJob(jobId);
+
+    if (!success) {
+      return res.status(404).json({
+        success: false,
+        error: `Integration job with ID ${jobId} not found`,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Integration job ${jobId} deleted successfully`,
+    });
+  } catch (error) {
+    logger.error(`Error deleting integration job ${req.params.jobId}:`, error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+// Create a new execution for a job
+router.post("/jobs/:jobId/executions", async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const syncType = req.body.syncType || "incremental";
+
+    const execution = await IntegrationJobService.createExecution(jobId, {
+      syncType,
+      createdBy: req.body.createdBy,
+      metadata: req.body.metadata,
+    });
+
+    if (!execution) {
+      return res.status(404).json({
+        success: false,
+        error: `Integration job with ID ${jobId} not found or disabled`,
+      });
+    }
+
+    // Start the worker to process the job
+    IntegrationJobService.startWorker();
+
+    res.status(201).json({
+      success: true,
+      data: execution,
+    });
+  } catch (error) {
+    logger.error(
+      `Error creating execution for job ${req.params.jobId}:`,
+      error
+    );
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+// Get all executions for a job
+router.get("/jobs/:jobId/executions", async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const limit = parseInt((req.query.limit as string) || "10");
+    const page = parseInt((req.query.page as string) || "1");
+    const status = req.query.status as string;
+
+    const skip = (page - 1) * limit;
+
+    const { executions, total } = await IntegrationJobService.getJobExecutions(
+      jobId,
+      {
+        limit,
+        skip,
+        status,
+      }
     );
 
     res.json({
       success: true,
-      data: syncInfo,
-    });
-  } catch (error) {
-    logger.error("Error getting sync status:", error);
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
-    });
-  }
-});
-
-// API endpoint to get all jobs with their status
-router.get("/sync-jobs", async (req: Request, res: Response) => {
-  try {
-    // Get query parameters for filtering
-    const status = req.query.status as string | undefined;
-    const limit = parseInt((req.query.limit as string) || "10");
-    const page = parseInt((req.query.page as string) || "1");
-
-    // Build the query
-    const query: any = {};
-    if (status) {
-      query.status = status.toUpperCase();
-    }
-
-    // Calculate pagination
-    const skip = (page - 1) * limit;
-
-    // Get jobs with pagination
-    const jobs = await JobState.find(query)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-
-    // Get total count for pagination
-    const totalCount = await JobState.countDocuments(query);
-
-    res.json({
-      success: true,
       data: {
-        jobs,
+        executions,
         pagination: {
-          total: totalCount,
+          total,
           page,
           limit,
-          pages: Math.ceil(totalCount / limit),
+          pages: Math.ceil(total / limit),
         },
       },
     });
   } catch (error) {
-    logger.error("Error getting jobs:", error);
+    logger.error(
+      `Error getting executions for job ${req.params.jobId}:`,
+      error
+    );
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : "Unknown error",
@@ -200,203 +319,75 @@ router.get("/sync-jobs", async (req: Request, res: Response) => {
   }
 });
 
-// API endpoint for diagnostics to check database operations
-router.get("/sync-diagnostics", async (req: Request, res: Response) => {
+// Get a specific execution
+router.get("/executions/:executionId", async (req: Request, res: Response) => {
   try {
-    const storeId =
-      (req.query.storeId as string) ||
-      process.env.SHOPIFY_HOST ||
-      "default-store";
-    const productId = req.query.productId as string;
+    const { executionId } = req.params;
+    const execution = await IntegrationJobService.getExecution(executionId);
 
-    // Test direct write to database
-    if (productId) {
-      // Create a test product
-      const testProduct = new ProductModel({
-        storeId,
-        productId: `test-${productId}`,
-        title: `Test Product ${Date.now()}`,
-        handle: `test-product-${Date.now()}`,
-        variants: [
-          {
-            variantId: `test-variant-${Date.now()}`,
-            price: "9.99",
-            sku: `TEST-SKU-${Date.now()}`,
-          },
-        ],
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        shopifyCreatedAt: new Date(),
-        shopifyUpdatedAt: new Date(),
-      });
-
-      // Try to save it
-      const savedProduct = await testProduct.save();
-
-      return res.json({
-        success: true,
-        message: "Test product saved successfully",
-        product: savedProduct,
-        diagnostics: {
-          dbConnection: "Connected",
-          writeTest: "Successful",
-        },
-      });
-    }
-
-    // Get database stats
-    const totalProducts = await ProductModel.countDocuments({ storeId });
-    const recentProducts = await ProductModel.find({ storeId })
-      .sort({ createdAt: -1 })
-      .limit(5);
-
-    // Get database connection status
-    const dbState = mongoose.connection.readyState;
-    let dbStateText;
-    switch (dbState) {
-      case 0:
-        dbStateText = "Disconnected";
-        break;
-      case 1:
-        dbStateText = "Connected";
-        break;
-      case 2:
-        dbStateText = "Connecting";
-        break;
-      case 3:
-        dbStateText = "Disconnecting";
-        break;
-      default:
-        dbStateText = "Unknown";
-    }
-
-    // Get ongoing jobs
-    const runningJobs = await JobState.find({ status: "RUNNING" })
-      .sort({ createdAt: -1 })
-      .limit(5);
-
-    // Get latest completed job
-    const latestJob = await JobState.findOne({ status: "COMPLETED" }).sort({
-      updatedAt: -1,
-    });
-
-    res.json({
-      success: true,
-      diagnostics: {
-        database: {
-          connectionState: dbStateText,
-          readyState: dbState,
-        },
-        products: {
-          totalCount: totalProducts,
-          recentProducts: recentProducts.map((p) => ({
-            id: p.productId,
-            title: p.title,
-            createdAt: p.createdAt,
-            updatedAt: p.updatedAt,
-          })),
-        },
-        jobs: {
-          running: runningJobs.map((j) => ({
-            jobId: j.jobId,
-            progress: j.progress,
-            createdAt: j.createdAt,
-            recordsProcessed: j.recordsSucceeded,
-          })),
-          latestCompleted: latestJob
-            ? {
-                jobId: latestJob.jobId,
-                completedAt: latestJob.updatedAt,
-                recordsProcessed: latestJob.recordsSucceeded,
-                lastSyncTime: latestJob.lastSyncTime,
-              }
-            : null,
-        },
-      },
-    });
-  } catch (error) {
-    logger.error("Error running diagnostics:", error);
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
-      stack: error instanceof Error ? error.stack : undefined,
-    });
-  }
-});
-
-// Add a direct test route for database operations
-router.post("/test-db-write", async (req: Request, res: Response) => {
-  try {
-    const { storeId = "test-store", productId = `test-${Date.now()}` } =
-      req.body;
-
-    // Create a test product
-    const testProduct = new ProductModel({
-      storeId,
-      productId,
-      title: `Test Product ${productId}`,
-      handle: `test-product-${productId}`,
-      variants: [
-        {
-          variantId: `test-variant-${Date.now()}`,
-          price: "9.99",
-          sku: `TEST-SKU-${Date.now()}`,
-        },
-      ],
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      shopifyCreatedAt: new Date(),
-      shopifyUpdatedAt: new Date(),
-    });
-
-    // Save it
-    const savedProduct = await testProduct.save();
-
-    // Verify it was saved by querying it back
-    const verifiedProduct = await ProductModel.findOne({ storeId, productId });
-
-    res.json({
-      success: true,
-      message: "Test product saved and verified",
-      product: savedProduct,
-      verified: !!verifiedProduct,
-      verifiedProduct,
-    });
-  } catch (error) {
-    logger.error("Error testing database write:", error);
-    res.status(500).json({
-      success: false,
-      error: error instanceof Error ? error.message : "Unknown error",
-      stack: error instanceof Error ? error.stack : undefined,
-    });
-  }
-});
-
-// Add to src/routes/api.ts
-router.get("/products/:productId", async (req: Request, res: Response) => {
-  try {
-    const { productId } = req.params;
-
-    // Find the product in database
-    const product = await ProductModel.findOne({ productId });
-
-    if (!product) {
+    if (!execution) {
       return res.status(404).json({
         success: false,
-        error: `Product with ID ${productId} not found`,
+        error: `Execution with ID ${executionId} not found`,
       });
     }
 
-    // Enable CORS for frontend
-    res.header("Access-Control-Allow-Origin", "*");
-
-    // Return the product data
     res.json({
       success: true,
-      data: product,
+      data: execution,
     });
   } catch (error) {
-    logger.error(`Error fetching product ${req.params.productId}:`, error);
+    logger.error(`Error getting execution ${req.params.executionId}:`, error);
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
+
+// Cancel an execution
+router.post(
+  "/executions/:executionId/cancel",
+  async (req: Request, res: Response) => {
+    try {
+      const { executionId } = req.params;
+      const success = await IntegrationJobService.cancelExecution(executionId);
+
+      if (!success) {
+        return res.status(400).json({
+          success: false,
+          error: `Execution ${executionId} not found or cannot be cancelled`,
+        });
+      }
+
+      res.json({
+        success: true,
+        message: `Execution ${executionId} cancelled successfully`,
+      });
+    } catch (error) {
+      logger.error(
+        `Error cancelling execution ${req.params.executionId}:`,
+        error
+      );
+      res.status(500).json({
+        success: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  }
+);
+
+// API endpoint to trigger scheduler manually
+router.post("/scheduler/run", async (req: Request, res: Response) => {
+  try {
+    const scheduledCount = await IntegrationJobService.processScheduledJobs();
+
+    res.json({
+      success: true,
+      message: `Scheduled ${scheduledCount} jobs for execution`,
+    });
+  } catch (error) {
+    logger.error("Error running scheduler:", error);
     res.status(500).json({
       success: false,
       error: error instanceof Error ? error.message : "Unknown error",

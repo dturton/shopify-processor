@@ -6,6 +6,8 @@ import mongoose from "mongoose";
 import apiRoutes from "./routes/api";
 import config from "./config";
 import logger from "./utils/logger";
+import { IntegrationJobService } from "./services/IntegrationJobService";
+
 import { integrationQueue } from "./queues/IntegrationJobProcessor";
 const { createBullBoard } = require("@bull-board/api");
 const { BullMQAdapter } = require("@bull-board/api/bullMQAdapter");
@@ -13,6 +15,9 @@ const { ExpressAdapter } = require("@bull-board/express");
 
 const serverAdapter = new ExpressAdapter();
 serverAdapter.setBasePath("/admin/queues");
+
+// Start the job scheduler
+const scheduler = IntegrationJobService.setupScheduler(15); // Check every 15 minutes
 
 const { addQueue, removeQueue, setQueues, replaceQueues } = createBullBoard({
   queues: [new BullMQAdapter(integrationQueue)],

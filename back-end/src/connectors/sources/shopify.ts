@@ -13,18 +13,29 @@ export default async function fetchData(
   try {
     // Get configuration from sync context
     const config = syncContext.getConfig();
-    const storeId = config.shopName || "default-store";
+
+    // Support both naming conventions for shop credentials
+    const shopName = config.shopName || config.shopify?.shopName;
+    const accessToken = config.accessToken || config.shopify?.accessToken;
+
+    if (!shopName || !accessToken) {
+      throw new Error(
+        "Missing required Shopify credentials (shopName and accessToken)"
+      );
+    }
+
+    const storeId = shopName || "default-store";
     const syncCursor = new Date().toISOString(); // Use timestamp as cursor for this sync run
 
     // Initialize the Shopify API with credentials from config
     const shopifyAPI = new ShopifyAPI({
-      shopName: config.shopName,
-      accessToken: config.accessToken,
+      shopName,
+      accessToken,
     });
 
     syncContext.log(
       "info",
-      `Processing Shopify products for shop: ${config.shopName} with sync cursor: ${syncCursor}`
+      `Processing Shopify products for shop: ${shopName} with sync cursor: ${syncCursor}`
     );
 
     // Configure filters for the product fetch

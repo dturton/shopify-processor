@@ -5,7 +5,8 @@ export interface SyncContext {
   recordSuccess(count?: number): void;
   recordFailure(count?: number): void;
   updateProgress(progress: number): void;
-
+  filters: ProductFilters;
+  credentials: ShopifyCredentials;
   // Methods for data collection
   collectRecords(records: any[], modelName: string): void;
 

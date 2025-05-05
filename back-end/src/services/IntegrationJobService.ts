@@ -340,11 +340,6 @@ export class IntegrationJobService {
 
         // Add previous cursor for incremental syncs
         lastSyncCursor: execution.syncCursor,
-
-        // For Shopify integration, make sure we use the correct credential field names
-        // that match what the connector expects
-        shopName: job.configuration.get("shopName"),
-        accessToken: job.configuration.get("accessToken"),
       };
 
       // Create a sync context
