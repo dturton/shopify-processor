@@ -18,55 +18,14 @@ const integrationQueue = new Queue("integrations", { connection });
  */
 export class IntegrationJobProcessor {
   /**
-   * Create a new job in BullMQ and MongoDB
-   */
-  static async createJob(
-    sourceType: string,
-    destinationType: string,
-    options: any = {}
-  ) {
-    const jobId = `job-${Date.now()}-${Math.random()
-      .toString(36)
-      .substring(2, 9)}`;
-
-    logger.info(
-      `Creating new job: ${jobId}, type: ${sourceType} to ${destinationType}`
-    );
-
-    // Create the initial job state
-    const state = new JobState({
-      jobId,
-      sourceType,
-      destinationType,
-      status: "CREATED",
-      totalRecords: 0,
-      recordsSucceeded: 0,
-      recordsFailed: 0,
-      progress: 0,
-      lastSyncTime: null, // Initial sync has no lastSyncTime
-    });
-    const savedState = await state.save();
-
-    // Then add to BullMQ queue
-    const job = await integrationQueue.add(
-      "process-integration",
-      { ...savedState.toObject() },
-      { ...options }
-    );
-
-    logger.info(`Job ${jobId} created and added to queue`);
-
-    return job;
-  }
-
-  /**
    * Create an incremental sync job based on a previous job
    * This will use the lastSyncTime from the most recent successful job
    */
   static async createIncrementalJob(
     sourceType: string,
     destinationType: string,
-    options: any = {}
+    options: any = {},
+    syncType: "full" | "incremental" = "incremental"
   ) {
     logger.info(
       `Creating incremental job for ${sourceType} to ${destinationType}`
@@ -94,7 +53,10 @@ export class IntegrationJobProcessor {
       recordsSucceeded: 0,
       recordsFailed: 0,
       progress: 0,
-      lastSyncTime: previousJob ? previousJob.lastSyncTime : null,
+      lastSyncTime:
+        syncType === "incremental" && previousJob
+          ? previousJob.lastSyncTime
+          : null,
     });
     await state.save();
 
@@ -120,7 +82,7 @@ export class IntegrationJobProcessor {
 
     return {
       job,
-      isIncremental: !!previousJob,
+      isIncremental: syncType === "incremental",
       previousSyncTime: previousJob ? previousJob.lastSyncTime : null,
     };
   }

@@ -78,7 +78,11 @@ export class ShopifyAPI {
       // Loop until we've fetched all products, yielding each batch as it's retrieved
       while (hasNextPage) {
         // Create new variables object for each request with updated cursor
-        const variables = {
+        const variables: {
+          first: number;
+          after: string | null;
+          query: string | null;
+        } = {
           first: batchSize,
           after: cursor,
           query: queryString,

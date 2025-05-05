@@ -39,3 +39,21 @@ export interface SyncMetrics {
     [key: string]: any;
   };
 }
+
+// Add these to your src/types/index.ts file
+
+export interface ShopifyCredentials {
+  shopName: string;
+  accessToken: string;
+  filters?: ProductFilters;
+}
+
+export interface ProductFilters {
+  productType?: string;
+  vendor?: string;
+  createdAtMin?: string;
+  createdAtMax?: string;
+  updatedAtMin?: string;
+  updatedAtMax?: string;
+  [key: string]: string | undefined;
+}

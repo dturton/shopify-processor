@@ -38,6 +38,8 @@ router.post(
   "/sync-products",
   validateShopifyCredentials,
   async (req: Request, res: Response) => {
+    const syncType = req.body.syncType || "incremental";
+    const limit = req.body.limit || 250;
     try {
       // Create a full sync job
       const job = await IntegrationJobProcessor.createIncrementalJob(
@@ -57,11 +59,7 @@ router.post(
 
       res.json({
         success: true,
-        message: "Full product sync started",
-        data: {
-          jobId: job.id,
-          type: "full",
-        },
+        job,
       });
     } catch (error) {
       logger.error("Error starting full product sync:", error);

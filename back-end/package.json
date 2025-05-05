@@ -36,15 +36,16 @@
     "@shopify/api-codegen-preset": "^1.1.7",
     "@types/cors": "^2.8.13",
     "@types/express": "^4.17.17",
-    "@types/jest": "^29.5.3",
+    "@types/jest": "^29.5.14",
     "@types/node": "^20.17.32",
     "@typescript-eslint/eslint-plugin": "^6.2.1",
     "@typescript-eslint/parser": "^6.2.1",
     "eslint": "^8.46.0",
-    "jest": "^29.6.2",
-    "ts-jest": "^29.1.1",
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.1.4",
+    "ts-jest": "^29.3.2",
     "ts-node-dev": "^2.0.0",
     "tsconfig-paths": "^4.2.0",
-    "typescript": "^5.1.6"
+    "typescript": "^5.8.3"
   }
 }
