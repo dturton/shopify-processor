@@ -12,28 +12,9 @@ export class ShopifyAPI {
       accessToken: credentials.accessToken,
       apiVersion: "2025-01", // Update this according to the latest Shopify API version
       logger: (log) => {
-        logger.debug(JSON.stringify(log, null, 2));
+        //logger.debug(JSON.stringify(log, null, 2));
       },
     });
-  }
-
-  async getProductsCount(date: string): Promise<number> {
-    const query = `#graphql
-    query GetProductsCount($query: String) {
-      productsCount(query: $query) {
-        count
-      }
-    }
-  `;
-
-    // Format the query string properly - note no quotes and no spaces around operators
-    const queryString = `updated_at:>='${date}'`;
-
-    const response = await this.client.request(query, {
-      variables: { query: queryString },
-    });
-
-    return response.data.productsCount.count;
   }
 
   /**
@@ -54,21 +35,21 @@ export class ShopifyAPI {
 
       // Construct the GraphQL query with #graphql tag
       const query = `#graphql
-      query GetProductIds($first: Int!, $after: String, $query: String) {
-        products(first: $first, after: $after, query: $query) {
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-          edges {
-            node {
-              id
-              updatedAt
-            }
+    query GetProductIds($first: Int!, $after: String, $query: String) {
+      products(first: $first, after: $after, query: $query) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        edges {
+          node {
+            id
+            updatedAt
           }
         }
       }
-    `;
+    }
+  `;
 
       // Build query string for filtering
       const queryParts = [];
@@ -91,22 +72,20 @@ export class ShopifyAPI {
         queryParts.push(`updated_at:<='${filters.updatedAtMax}'`);
       }
 
-      const variables: {
-        first: number;
-        after: string | null;
-        query: string | null;
-      } = {
-        first: batchSize,
-        after: cursor,
-        query: queryParts.length > 0 ? queryParts.join(" AND ") : null,
-      };
+      const queryString =
+        queryParts.length > 0 ? queryParts.join(" AND ") : null;
 
-      // Prepare variables for the GraphQL request
-
-      const productCount = await this.getProductsCount(variables);
-      console.log("Product count: ", productCount);
       // Loop until we've fetched all products, yielding each batch as it's retrieved
       while (hasNextPage) {
+        // Create new variables object for each request with updated cursor
+        const variables = {
+          first: batchSize,
+          after: cursor,
+          query: queryString,
+        };
+
+        logger.debug(`Fetching products with cursor: ${cursor}`);
+
         // Make the request with the query and variables
         const response = await this.client.request(query, {
           variables,
@@ -138,7 +117,6 @@ export class ShopifyAPI {
       throw error;
     }
   }
-
   async getShopInfo(): Promise<{ id: string }> {
     const query = `#graphql
       query GetShopInfo {
